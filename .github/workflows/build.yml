@@ -15,7 +15,7 @@ jobs:
         run: rustup toolchain install 1.84.1 --profile minimal && rustup default 1.84.1
 
       - name: Unit tests (run rules)
-        run: cargo test --manifest-path programs/creatorfun-buyback/Cargo.toml
+        run: cargo test --locked --manifest-path programs/creatorfun-buyback/Cargo.toml
 
       - name: Solana CLI 2.1.21
         run: |
