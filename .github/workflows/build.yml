@@ -1,0 +1,40 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: rustup toolchain install 1.84.1 --profile minimal && rustup default 1.84.1
+
+      - name: Unit tests (run rules)
+        run: cargo test --manifest-path programs/creatorfun-buyback/Cargo.toml
+
+      - name: Solana CLI 2.1.21
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Anchor CLI 0.31.1
+        run: cargo install --git https://github.com/solana-foundation/anchor --tag v0.31.1 anchor-cli --locked
+
+      - name: Build program
+        run: anchor build
+
+      - name: Program hash
+        run: sha256sum target/deploy/creatorfun_buyback.so | tee target/deploy/creatorfun_buyback.so.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: creatorfun-buyback
+          path: |
+            target/deploy/creatorfun_buyback.so
+            target/deploy/creatorfun_buyback.so.sha256
+            target/idl/creatorfun_buyback.json

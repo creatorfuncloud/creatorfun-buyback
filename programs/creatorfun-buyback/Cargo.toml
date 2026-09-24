@@ -1,0 +1,25 @@
+[package]
+name = "creatorfun-buyback"
+version = "0.1.0"
+description = "CREATORFUN permanent buyback & burn"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/creatorfuncloud/creatorfun-buyback"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "creatorfun_buyback"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+# Builds the devnet test version (different CREATORFUN config address). Never deployed to mainnet.
+devnet = []
+
+[dependencies]
+anchor-lang = { version = "=0.31.1", features = ["init-if-needed"] }
+anchor-spl = "=0.31.1"
