@@ -38,3 +38,4 @@ jobs:
             target/deploy/creatorfun_buyback.so
             target/deploy/creatorfun_buyback.so.sha256
             target/idl/creatorfun_buyback.json
+            Cargo.lock

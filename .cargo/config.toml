@@ -1,0 +1,3 @@
+# Pick dependency versions that support the rust-version in programs/creatorfun-buyback/Cargo.toml.
+[resolver]
+incompatible-rust-versions = "fallback"

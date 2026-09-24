@@ -3,6 +3,8 @@ name = "creatorfun-buyback"
 version = "0.1.0"
 description = "CREATORFUN permanent buyback & burn"
 edition = "2021"
+# Solana 2.1 platform-tools compile with Rust 1.79; dependencies are resolved to versions that support it.
+rust-version = "1.79"
 license = "MIT"
 repository = "https://github.com/creatorfuncloud/creatorfun-buyback"
 
