@@ -7,7 +7,7 @@ resolution = true
 skip-lint = false
 
 [programs.mainnet]
-creatorfun_buyback = "11111111111111111111111111111111"
+creatorfun_buyback = "eJGfjnQn4Gk7gNvyGNmDYPjBQBu6msUmSUr91fyUq2j"
 
 [provider]
 cluster = "mainnet"

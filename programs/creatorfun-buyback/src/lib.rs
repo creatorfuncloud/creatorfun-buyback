@@ -35,7 +35,7 @@ use anchor_spl::associated_token::{self, get_associated_token_address, Associate
 use anchor_spl::token::{self, spl_token::native_mint, Burn, CloseAccount, Mint, SyncNative, Token, TokenAccount, Transfer};
 use anchor_spl::token_interface::TokenAccount as AnyTokenAccount;
 
-declare_id!("11111111111111111111111111111111"); // replaced with the real program id before the first build
+declare_id!("eJGfjnQn4Gk7gNvyGNmDYPjBQBu6msUmSUr91fyUq2j");
 
 // ---------------------------------------------------------------------------
 // Fixed rules. Compiled into the program; the same for every token.
