@@ -25,11 +25,20 @@ jobs:
       - name: Anchor CLI 0.31.1
         run: cargo install --git https://github.com/solana-foundation/anchor --tag v0.31.1 anchor-cli --locked
 
-      - name: Build program
+      - name: Build devnet test version
+        run: |
+          anchor build -- --features devnet
+          cp target/deploy/creatorfun_buyback.so creatorfun_buyback_devnet.so
+
+      - name: Build program (mainnet)
         run: anchor build
 
       - name: Program hash
-        run: sha256sum target/deploy/creatorfun_buyback.so | tee target/deploy/creatorfun_buyback.so.sha256
+        run: |
+          mv creatorfun_buyback_devnet.so target/deploy/
+          sha256sum target/deploy/creatorfun_buyback.so | tee target/deploy/creatorfun_buyback.so.sha256
+          sha256sum target/deploy/creatorfun_buyback_devnet.so
+          ls -l target/deploy/*.so
 
       - uses: actions/upload-artifact@v4
         with:
@@ -37,5 +46,6 @@ jobs:
           path: |
             target/deploy/creatorfun_buyback.so
             target/deploy/creatorfun_buyback.so.sha256
+            target/deploy/creatorfun_buyback_devnet.so
             target/idl/creatorfun_buyback.json
             Cargo.lock

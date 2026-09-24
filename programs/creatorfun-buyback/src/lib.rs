@@ -74,7 +74,10 @@ pub const AUTHORITY_RESERVE: u64 = 5_000_000; // 0.005 SOL, paid by the creator 
 /// creator's money depends on the program while it can still be upgraded. The public version sets
 /// this to false and is published together with the removal of the upgrade authority.
 pub const PROBATION: bool = true;
+#[cfg(not(feature = "devnet"))]
 pub const PROBATION_CREATORS: [Pubkey; 1] = [pubkey!("DTmBFBxCNLsZgEsGqWBSVfKj1rrQtZQMT3WuTTGRPMwH")];
+#[cfg(feature = "devnet")]
+pub const PROBATION_CREATORS: [Pubkey; 1] = [pubkey!("5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF")]; // devnet test wallet
 
 // ---------------------------------------------------------------------------
 // External programs and accounts (Meteora, CREATORFUN)
@@ -89,7 +92,7 @@ pub const DAMM_POOL_AUTHORITY: Pubkey = pubkey!("HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B
 #[cfg(not(feature = "devnet"))]
 pub const CREATORFUN_CONFIG: Pubkey = pubkey!("GRFxBcjZEcjMV8qAMsdiGu43gmqr8WgyyPJh1w3inBPo");
 #[cfg(feature = "devnet")]
-pub const CREATORFUN_CONFIG: Pubkey = pubkey!("11111111111111111111111111111111"); // set to the devnet test config
+pub const CREATORFUN_CONFIG: Pubkey = pubkey!("6DNThd3xWokjwqVerywpKLqRASmt5ygfFnMz2iRuhv72"); // devnet copy of the same rules
 
 /// DAMM v2 config Meteora uses when a CREATORFUN token graduates (migration fee option 2 = FixedBps100).
 /// The graduated pool address is derived from it, so no other pool can be used.
