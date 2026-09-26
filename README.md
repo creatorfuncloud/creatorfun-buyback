@@ -27,7 +27,7 @@ A promise only means something if it cannot be broken. So once a creator turns i
                                   ▼
                    buyback authority (program PDA, no private key)
                                   │
-         prepare_* records the pool price  ──►  execute_* 2–150 slots later
+         prepare_* records the pool price  ──►  execute_* 25–300 slots later (same caller)
                    │                                   │
         buyback_bps of the SOL                  the rest of the SOL
         buys the token on its own pool          is sent to the creator wallet
@@ -41,8 +41,8 @@ A promise only means something if it cannot be broken. So once a creator turns i
    - `claim_curve_surplus` — the creator's share of the curve surplus after the curve completes.
    - `claim_amm_fees` — after graduation, the fees of the creator's locked LP position in the DAMM v2 pool.
    SOL arrives as wSOL and is unwrapped to plain SOL in the same instruction.
-3. **`prepare_curve` / `prepare_amm`** — record the pool's current price and slot.
-4. **`execute_curve` / `execute_amm`** — 2 to 150 slots (about 1 second to 1 minute) after `prepare`, and only if the price has not moved more than about 1% against the buy, the program:
+3. **`prepare_curve` / `prepare_amm`** — only when a run is ready: record the pool's current price, slot and caller. A live prepare can only be replaced by the keeper, so nobody can keep cancelling the keeper's runs.
+4. **`execute_curve` / `execute_amm`** — called by the same wallet that called `prepare`, 25 to 300 slots (about 10 seconds to 2 minutes) later, and only if the price has not moved more than about 1% against the buy, the program:
    - spends `buyback_bps` of the collected SOL buying the token on its own pool,
    - burns every token it bought (SPL `burn`: the supply really goes down),
    - sends the rest of the SOL to the creator wallet saved in `enable`,
@@ -55,9 +55,9 @@ A promise only means something if it cannot be broken. So once a creator turns i
 | A run is allowed when | collected SOL ≥ threshold, **or** 7 days since the last run and ≥ 0.01 SOL collected |
 | Minimum gap between runs | 10 minutes |
 | Max buyback per run | 1 SOL (bigger balances are processed over several runs) |
-| Max buyback per 24 hours | 5 SOL per token |
-| Price check | `execute` must come 2–150 slots after `prepare`, and the pool price may be at most ~1% worse than at `prepare` (50 bps on the sqrt price) |
-| Slippage | the caller must pass `min_tokens_out > 0`; if the swap gives less, the whole transaction fails and nothing is lost |
+| Max buyback per 24 hours | 5 SOL per token, in fixed 24-hour windows (a window starts at the first run after the last one ended, so around a boundary two windows can be used close together). A leftover allowance under 0.01 SOL waits for the next window |
+| Price check | `execute` must come 25–300 slots after `prepare`, from the same wallet, and the pool price may be at most ~1% worse than at `prepare` (50 bps on the sqrt price) |
+| Slippage | the program computes a floor on-chain: at least 75% of the tokens the prepared price gives before fees and price impact. The caller can only ask for more (`min_tokens_out`), never less. If the swap gives less, the whole transaction fails and nothing is lost |
 | Who can run | the CREATORFUN keeper whenever the rules allow; **anyone** once 8 days have passed since the last run |
 | Small payouts | creator payouts below 0.001 SOL are kept on record (`creator_owed`) and paid with a later run, never lost |
 
@@ -75,12 +75,12 @@ The rule fields of a vault (`pool`, `base_mint`, `creator`, `buyback_bps`, `thre
 
 ## Exactly what the keeper can do
 
-The keeper (`5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF`) is the wallet the CREATORFUN server uses to run buybacks on time.
+The keeper (`5nMsHjBcHCtH2wu1M5BSymsZLwt3oosdk82bwXvXpd4t`) is the wallet the CREATORFUN server uses to run buybacks on time. It is its own key, separate from the fee wallet and every test wallet. (The devnet test build uses `5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF`.)
 
-- It **can**: call `prepare_*` and `execute_*` before the 8-day public window opens, and choose `min_tokens_out`.
-- It **cannot**: receive any funds, choose where funds go, skip the price check, exceed the per-run or daily caps, or change any rule.
+- It **can**: call `prepare_*` and `execute_*` before the 8-day public window opens, replace a live prepare, and ask for a higher `min_tokens_out` than the on-chain floor.
+- It **cannot**: receive any funds, choose where funds go, skip the price check, go below the on-chain minimum, exceed the per-run or daily caps, or change any rule.
 - If the keeper stops, anyone can run the vault 8 days after its last run. Claims are open to anyone at all times.
-- The keeper sets `min_tokens_out` from a fresh quote with 1% slippage and retries with a new quote if a run fails.
+- The keeper asks for `min_tokens_out` from a fresh quote with 1% slippage (above the on-chain floor) and retries with a new prepare if a run fails.
 
 ## Probation: the one remaining power
 
@@ -93,7 +93,7 @@ During probation the program is deployed **with an upgrade authority**, so bugs 
 ## Known limits (please read)
 
 - **Unaudited.** CREATORFUN could not afford a professional audit. The code is public, the rules are small pure functions with unit tests, and the launch is staged. Please review it and report problems — see [SECURITY.md](SECURITY.md).
-- **MEV is reduced, not removed.** A buyback is a market buy. The `prepare` → `execute` price check makes a same-block price push fail, `min_tokens_out` stops overpaying, and the caps limit how much any single run or day can lose. Someone willing to hold a manipulated price across several slots and take on arbitrage risk could still make a run slightly worse; each run is at most 1 SOL.
+- **MEV is reduced, not removed.** A buyback is a market buy. The `prepare` → `execute` price check makes a same-block price push fail, the 25-slot wait means a pushed price must survive about 10 seconds of arbitrage, only the preparing wallet can execute, the on-chain minimum stops a run from accepting a very bad fill, and the caps limit how much any single run or day can lose. Someone willing to hold a manipulated price for that long and take on the arbitrage risk could still make a run worse; each run is at most 1 SOL.
 - **Meteora layout.** The program reads fixed byte offsets of Meteora accounts (listed at the top of `lib.rs`, checked against live mainnet accounts). If Meteora changed those layouts, calls would fail rather than misread: every read also checks the owner program and the account discriminator.
 - **SPL Token only.** Token-2022 mints are not supported. CREATORFUN tokens are SPL tokens.
 - **The graduated pool is fixed.** After graduation the program only uses the DAMM v2 pool derived from the CREATORFUN migration config and the token mint, and only an LP position owned by the authority, so a fake pool cannot be substituted.

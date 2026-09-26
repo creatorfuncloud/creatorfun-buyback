@@ -9,7 +9,7 @@
  *   node devnet-test.js enable <bps> <sol>     turn buyback on (e.g. enable 5000 0.1)
  *   node devnet-test.js trade <rounds> <sol>   buy then sell <sol> per round to generate fees
  *   node devnet-test.js claim                  claim_curve_fees (anyone can call)
- *   node devnet-test.js run                    prepare_curve, wait 2+ slots, execute_curve
+ *   node devnet-test.js run                    prepare_curve, wait 25+ slots, execute_curve
  *   node devnet-test.js status                 vault, balances, token supply
  *   node devnet-test.js negative               actions that MUST fail
  *
@@ -172,6 +172,7 @@ function expectedBuy(v, authorityLamports, now) {
   const splittable = Math.max(0, authorityLamports - RESERVE - Number(v.creatorOwed));
   const spent = now - Number(v.dayStart) >= 86400 ? 0 : Number(v.daySpent);
   const cap = Math.min(1e9, 5e9 - spent);
+  if (cap < 1e7) return 0; // MIN_BUY: the program waits for the next window
   const used = Math.min(splittable, Math.floor((cap * 10000) / v.buybackBps));
   return Math.floor((used * v.buybackBps) / 10000);
 }
@@ -179,9 +180,9 @@ function expectedBuy(v, authorityLamports, now) {
 async function run() {
   const c = ctx();
   const v = await program.account.vault.fetch(c.vault);
-  const prepSig = await program.methods.prepareCurve().accountsStrict({ caller: me.publicKey, vault: c.vault, curvePool: c.pool }).rpc();
+  const prepSig = await program.methods.prepareCurve().accountsStrict({ caller: me.publicKey, vault: c.vault, authority: c.authority, curvePool: c.pool }).rpc();
   const prepSlot = (await connection.getTransaction(prepSig, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 })).slot;
-  while ((await connection.getSlot('confirmed')) < prepSlot + 2) await sleep(300);
+  while ((await connection.getSlot('confirmed')) < prepSlot + 26) await sleep(400);
 
   const raw = await dbc.state.getPool(c.pool);
   const st = raw.account || raw.poolState || raw;
@@ -254,7 +255,7 @@ async function negative() {
   }).rpc(), 'already in use');
 
   await expectFail('stranger prepares before the 8-day public window', () => program.methods.prepareCurve()
-    .accountsStrict({ caller: stranger.publicKey, vault: c.vault, curvePool: c.pool }).signers([stranger]).rpc(), 'KeeperWindow');
+    .accountsStrict({ caller: stranger.publicKey, vault: c.vault, authority: c.authority, curvePool: c.pool }).signers([stranger]).rpc(), 'KeeperWindow');
 
   await expectFail('execute without prepare', () => program.methods.executeCurve(new BN(1)).accountsStrict({
     common: runAccounts(c, v), venuePool: c.pool, baseVault: st.baseVault, quoteVault: st.quoteVault,
@@ -267,9 +268,23 @@ async function negative() {
     dbcConfig: CONFIG, dbcPoolAuthority: DBC_POOL_AUTHORITY, dbcEventAuthority: dbcEvent, dbcProgram: DBC,
   }).rpc(), 'ConstraintAddress');
 
+  // The next two need a ready vault (claimed fees above the threshold); otherwise prepare stops with NotReady.
+  const ready = await program.methods.prepareCurve().accountsStrict({ caller: me.publicKey, vault: c.vault, authority: c.authority, curvePool: c.pool }).rpc().then(() => true, (e) => { console.log(`  (skip early/other-caller checks: ${String(e.message || e).slice(0, 80)})`); return false; });
+  if (ready) {
+    await expectFail('execute right after prepare (under 25 slots)', () => program.methods.executeCurve(new BN(0)).accountsStrict({
+      common: runAccounts(c, v), venuePool: c.pool, baseVault: st.baseVault, quoteVault: st.quoteVault,
+      dbcConfig: CONFIG, dbcPoolAuthority: DBC_POOL_AUTHORITY, dbcEventAuthority: dbcEvent, dbcProgram: DBC,
+    }).rpc(), 'NotPrepared');
+    await expectFail('another wallet executes the keeper prepare', () => program.methods.executeCurve(new BN(0)).accountsStrict({
+      common: { ...runAccounts(c, v), caller: stranger.publicKey },
+      venuePool: c.pool, baseVault: st.baseVault, quoteVault: st.quoteVault,
+      dbcConfig: CONFIG, dbcPoolAuthority: DBC_POOL_AUTHORITY, dbcEventAuthority: dbcEvent, dbcProgram: DBC,
+    }).signers([stranger]).rpc(), 'NotYourPrepare');
+  }
+
   const fakeAmm = Keypair.generate().publicKey;
   await expectFail('use a pool that is not the derived graduated pool', () => program.methods.prepareAmm()
-    .accountsStrict({ caller: me.publicKey, vault: c.vault, ammPool: fakeAmm }).rpc(), 'WrongAmmPool');
+    .accountsStrict({ caller: me.publicKey, vault: c.vault, authority: c.authority, ammPool: fakeAmm }).rpc(), 'WrongAmmPool');
 
   await expectFail('stranger triggers a claim (allowed) but cannot receive the fees', async () => {
     const ix = await program.methods.claimCurveFees().accountsStrict(claimAccounts(c, st)).instruction();
