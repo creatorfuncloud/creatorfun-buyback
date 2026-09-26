@@ -3,3 +3,5 @@ node_modules/
 .anchor/
 *-keypair.json
 .env
+scripts/devnet-state*.json
+scripts/devnet-pair.json

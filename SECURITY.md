@@ -11,7 +11,7 @@ Out of scope: the Meteora programs themselves (report those to Meteora), the cre
 
 ## What we most want to hear about
 
-- Any way to move vault SOL or tokens anywhere other than "buy & burn" or "the creator wallet saved in `enable`".
+- Any way to move vault funds (SOL, stock tokens or the token itself) anywhere other than "buy & burn", "the donation wallet saved in `enable`" or "the creator wallet saved in `enable`".
 - Any way to change a vault's rule fields after `enable`, or to undo `enable`.
 - Any way to make a buyback run at a manipulated price beyond the limits described in the README.
 - Any way to permanently block claims or runs for a vault.
