@@ -75,7 +75,7 @@ pub const AUTHORITY_RESERVE: u64 = 5_000_000; // 0.005 SOL, paid by the creator 
 /// this to false and is published together with the removal of the upgrade authority.
 pub const PROBATION: bool = true;
 #[cfg(not(feature = "devnet"))]
-pub const PROBATION_CREATORS: [Pubkey; 1] = [pubkey!("DTmBFBxCNLsZgEsGqWBSVfKj1rrQtZQMT3WuTTGRPMwH")];
+pub const PROBATION_CREATORS: [Pubkey; 1] = [pubkey!("CooB38vtmMP4oLcSsLsmUn1YfLELG7NkfPXYTv21NcBx")]; // CREATORFUN fee wallet
 #[cfg(feature = "devnet")]
 pub const PROBATION_CREATORS: [Pubkey; 1] = [pubkey!("5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF")]; // devnet test wallet
 

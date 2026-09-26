@@ -184,13 +184,13 @@ async function run() {
   while ((await connection.getSlot('confirmed')) < prepSlot + 2) await sleep(300);
 
   const raw = await dbc.state.getPool(c.pool);
-  const st = raw.account || raw;
+  const st = raw.account || raw.poolState || raw;
   const config = await dbc.state.getPoolConfig(CONFIG);
   const buy = expectedBuy(v, await connection.getBalance(c.authority), Math.floor(Date.now() / 1000));
   let minOut = new BN(1);
   if (buy > 0) {
     const q = dbc.pool.swapQuote({
-      virtualPool: st, config, swapBaseForQuote: false, amountIn: new BN(buy), slippageBps: 100,
+      virtualPool: raw, config, swapBaseForQuote: false, amountIn: new BN(buy), slippageBps: 100,
       hasReferral: false, eligibleForFirstSwapWithMinFee: false, currentPoint: new BN(Math.floor(Date.now() / 1000)),
     });
     minOut = q.minimumAmountOut || (q.outputAmount || q.amountOut).muln(9900).divn(10000);
