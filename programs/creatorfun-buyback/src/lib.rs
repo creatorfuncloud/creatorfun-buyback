@@ -19,6 +19,7 @@
 //!
 //! Instructions:
 //!   enable              creator only, once per pool, before graduation
+//!   enable_presale      anyone: vault of a coin launched by a CREATORFUN presale whose creator chose buyback/support
 //!   claim_curve_fees    anyone: creator trading fees from the bonding curve -> this program
 //!   claim_curve_surplus anyone: creator share of the curve surplus (after the curve completes) -> this program
 //!   claim_amm_fees      anyone: creator LP fees from the graduated DAMM v2 pool -> this program
@@ -102,6 +103,13 @@ pub const PROBATION_CREATORS: [Pubkey; 1] = [pubkey!("5KQ2oGJbnsJiQ8GXZ1w7QCro2s
 pub const DBC_PROGRAM_ID: Pubkey = pubkey!("dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN");
 pub const DBC_POOL_AUTHORITY: Pubkey = pubkey!("FhVo3mqL8PW5pH5U2CN4XE33DokiyZnUwuGpH2hmHLuM");
 pub const DAMM_PROGRAM_ID: Pubkey = pubkey!("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
+
+/// CREATORFUN presale program. When a presale creator chose buyback or support, the presale's `launch` gives the
+/// new pool's creator rights to this program's authority before the first trade, and `enable_presale` opens
+/// the vault with the shares written into the presale when it opened.
+pub const PRESALE_PROGRAM_ID: Pubkey = pubkey!("2UoP3PnGv7X13GYYn9Dw8prQBJQnM4wVpEmaA4aH1X5e");
+/// Run threshold of a vault opened from a presale (a presale has no threshold field): 0.5 unit.
+pub const PRESALE_THRESHOLD_MU: u64 = 500;
 pub const DAMM_POOL_AUTHORITY: Pubkey = pubkey!("HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC");
 
 /// The CREATORFUN fee wallet. A pool is a CREATORFUN pool when its Meteora config names this wallet as the
@@ -137,6 +145,19 @@ const DAMM_POOL_TOKEN_A_MINT_OFFSET: usize = 168;
 const DAMM_POOL_TOKEN_B_MINT_OFFSET: usize = 200;
 const DAMM_POOL_SQRT_PRICE_OFFSET: usize = 456;
 const POSITION_DISCRIMINATOR: [u8; 8] = [170, 188, 143, 228, 122, 64, 247, 208];
+// creatorfun-presale `Presale` account (Anchor/Borsh, fixed part before the strings).
+const PRESALE_DISCRIMINATOR: [u8; 8] = [38, 215, 222, 14, 115, 220, 52, 168];
+const PS_CREATOR: usize = 8;
+const PS_DBC_CONFIG: usize = 48;
+const PS_QUOTE_MINT: usize = 80;
+const PS_STATUS: usize = 207;
+const PS_BASE_MINT: usize = 209;
+const PS_DBC_POOL: usize = 241;
+const PS_BUYBACK_BPS: usize = 290;
+const PS_DONATION_BPS: usize = 292;
+const PS_DONEE: usize = 294;
+const PS_MIN_LEN: usize = 326;
+const PS_STATUS_LAUNCHED: u8 = 1;
 const POSITION_POOL_OFFSET: usize = 8;
 const POSITION_NFT_MINT_OFFSET: usize = 40;
 // SPL token account layout (the same for Token and Token-2022): amount at 64.
@@ -280,6 +301,110 @@ pub mod creatorfun_buyback {
         vault.authority_bump = ctx.bumps.authority;
 
         emit!(BuybackEnabled { pool, base_mint, quote_mint, creator, donee, buyback_bps, donation_bps, threshold, unit });
+        Ok(())
+    }
+
+    /// Anyone (the CREATORFUN keeper does it right after the launch): open the vault of a coin launched by a
+    /// CREATORFUN presale whose creator chose buyback or support when opening the presale. The presale's launch
+    /// already gave the pool's creator rights to this program's authority, before the first trade. Every rule
+    /// (creator wallet, shares, donation wallet) is read from the launched presale account, written when the
+    /// presale opened; the caller chooses nothing. The caller pays the vault rent and the 0.005 SOL reserve.
+    pub fn enable_presale(ctx: Context<EnablePresale>) -> Result<()> {
+        let a = &ctx.accounts;
+        require_keys_eq!(*a.presale.owner, PRESALE_PROGRAM_ID, BuybackError::NotAPresale);
+        let ps = {
+            let d = a.presale.try_borrow_data()?;
+            read_presale(&d).ok_or(BuybackError::NotAPresale)?
+        };
+        require!(shares_ok(ps.buyback_bps, ps.donation_bps), BuybackError::SharesOutOfRange);
+        require!(!PROBATION || PROBATION_CREATORS.contains(&ps.creator), BuybackError::ProbationOnly);
+        require_keys_eq!(ps.dbc_pool, a.pool.key(), BuybackError::NotAPresale);
+        require_keys_eq!(ps.base_mint, a.base_mint.key(), BuybackError::WrongBaseMint);
+        require_keys_eq!(ps.dbc_config, a.config.key(), BuybackError::WrongConfig);
+        require_keys_eq!(ps.quote_mint, a.quote_mint.key(), BuybackError::WrongQuoteMint);
+        require_keys_eq!(ps.creator, a.creator.key(), BuybackError::NotThePoolCreator);
+        {
+            // The rights must already be ours (the presale's launch moved them before any trade).
+            let data = curve_pool_data(&a.pool)?;
+            require_keys_eq!(read_pubkey(&data, POOL_CONFIG_OFFSET), a.config.key(), BuybackError::WrongConfig);
+            require_keys_eq!(read_pubkey(&data, POOL_CREATOR_OFFSET), a.authority.key(), BuybackError::CreatorTransferFailed);
+            require_keys_eq!(read_pubkey(&data, POOL_BASE_MINT_OFFSET), a.base_mint.key(), BuybackError::WrongBaseMint);
+        }
+        let unit = {
+            require_keys_eq!(*a.config.owner, DBC_PROGRAM_ID, BuybackError::NotACreatorfunPool);
+            let data = a.config.try_borrow_data()?;
+            require!(data.len() >= CONFIG_MIN_LEN && data[..8] == POOL_CONFIG_DISCRIMINATOR, BuybackError::NotACreatorfunPool);
+            require_keys_eq!(read_pubkey(&data, CONFIG_FEE_CLAIMER_OFFSET), CREATORFUN_FEE_WALLET, BuybackError::NotACreatorfunPool);
+            require_keys_eq!(read_pubkey(&data, CONFIG_QUOTE_MINT_OFFSET), a.quote_mint.key(), BuybackError::WrongQuoteMint);
+            read_u64(&data, CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET) / UNITS_PER_GRADUATION
+        };
+        require!(unit > 0, BuybackError::NotACreatorfunPool);
+        let threshold = mu(unit, PRESALE_THRESHOLD_MU);
+        require_keys_eq!(*a.quote_mint.to_account_info().owner, a.quote_token_program.key(), BuybackError::WrongQuoteMint);
+        let quote_is_sol = a.quote_mint.key() == native_mint::ID;
+        let donee = if ps.donation_bps > 0 {
+            let d = &a.donee;
+            require_keys_eq!(d.key(), ps.donee, BuybackError::BadDonee);
+            require!(d.key() != Pubkey::default() && d.key() != a.authority.key() && !d.executable, BuybackError::BadDonee);
+            d.key()
+        } else {
+            Pubkey::default()
+        };
+
+        system_program::transfer(
+            CpiContext::new(a.system_program.to_account_info(), SolTransfer { from: a.payer.to_account_info(), to: a.authority.to_account_info() }),
+            AUTHORITY_RESERVE,
+        )?;
+        if !quote_is_sol {
+            let mut owners: Vec<(AccountInfo, AccountInfo)> = vec![
+                (a.authority.to_account_info(), a.authority_quote_ata.to_account_info()),
+                (a.creator.to_account_info(), a.creator_quote_ata.to_account_info()),
+            ];
+            if ps.donation_bps > 0 {
+                owners.push((a.donee.to_account_info(), a.donee_quote_ata.to_account_info()));
+            }
+            for (owner, ata) in owners {
+                open_ata(
+                    a.payer.to_account_info(),
+                    ata,
+                    owner,
+                    a.quote_mint.to_account_info(),
+                    a.quote_token_program.to_account_info(),
+                    a.associated_token_program.to_account_info(),
+                    a.system_program.to_account_info(),
+                    &[],
+                )?;
+            }
+        }
+
+        let now = Clock::get()?.unix_timestamp;
+        let quote_mint = a.quote_mint.key();
+        let quote_token_program = a.quote_token_program.key();
+        let config = a.config.key();
+        let pool = a.pool.key();
+        let base_mint = a.base_mint.key();
+        let vault = &mut ctx.accounts.vault;
+        vault.pool = pool;
+        vault.config = config;
+        vault.base_mint = base_mint;
+        vault.quote_mint = quote_mint;
+        vault.quote_token_program = quote_token_program;
+        vault.quote_is_sol = quote_is_sol;
+        vault.creator = ps.creator;
+        vault.donee = donee;
+        vault.buyback_bps = ps.buyback_bps;
+        vault.donation_bps = ps.donation_bps;
+        vault.threshold = threshold;
+        vault.unit = unit;
+        vault.created_at = now;
+        vault.last_run = now;
+        vault.day_start = now;
+        vault.bump = ctx.bumps.vault;
+        vault.authority_bump = ctx.bumps.authority;
+
+        emit!(BuybackEnabled {
+            pool, base_mint, quote_mint, creator: ps.creator, donee, buyback_bps: ps.buyback_bps, donation_bps: ps.donation_bps, threshold, unit,
+        });
         Ok(())
     }
 
@@ -777,6 +902,37 @@ pub fn required_min_out(amount_in: u64, ref_sqrt: u128, quote_per_token: bool, a
 }
 
 /// Pair asset available to split: everything held minus what is already owed (owed amounts are not split again).
+/// The rules a launched CREATORFUN presale carries for its coin (see `enable_presale`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PresaleRules {
+    pub creator: Pubkey,
+    pub dbc_config: Pubkey,
+    pub quote_mint: Pubkey,
+    pub base_mint: Pubkey,
+    pub dbc_pool: Pubkey,
+    pub buyback_bps: u16,
+    pub donation_bps: u16,
+    pub donee: Pubkey,
+}
+
+/// Reads a creatorfun-presale `Presale` account. None unless it is a presale that has launched.
+pub fn read_presale(d: &[u8]) -> Option<PresaleRules> {
+    if d.len() < PS_MIN_LEN || d[..8] != PRESALE_DISCRIMINATOR || d[PS_STATUS] != PS_STATUS_LAUNCHED {
+        return None;
+    }
+    let u16_at = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]);
+    Some(PresaleRules {
+        creator: read_pubkey(d, PS_CREATOR),
+        dbc_config: read_pubkey(d, PS_DBC_CONFIG),
+        quote_mint: read_pubkey(d, PS_QUOTE_MINT),
+        base_mint: read_pubkey(d, PS_BASE_MINT),
+        dbc_pool: read_pubkey(d, PS_DBC_POOL),
+        buyback_bps: u16_at(PS_BUYBACK_BPS),
+        donation_bps: u16_at(PS_DONATION_BPS),
+        donee: read_pubkey(d, PS_DONEE),
+    })
+}
+
 pub fn splittable_of(balance: u64, creator_owed: u64, donee_owed: u64) -> u64 {
     balance.saturating_sub(creator_owed).saturating_sub(donee_owed)
 }
@@ -1199,6 +1355,44 @@ pub struct Enable<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct EnablePresale<'info> {
+    /// Anyone (normally the CREATORFUN keeper). Pays for the vault, its token accounts and the 0.005 SOL reserve.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: the CREATORFUN presale that launched this coin; owner, layout and status are checked in the handler.
+    pub presale: UncheckedAccount<'info>,
+    /// CHECK: the presale creator (checked against the presale). Receives the creator share of every run.
+    pub creator: UncheckedAccount<'info>,
+    /// CHECK: the coin's Meteora bonding-curve pool (checked against the presale and read in the handler).
+    pub pool: UncheckedAccount<'info>,
+    /// CHECK: the pool's Meteora config; owner, layout, fee claimer and pair asset are checked in the handler.
+    pub config: UncheckedAccount<'info>,
+    pub base_mint: Box<Account<'info, Mint>>,
+    pub quote_mint: Box<InterfaceAccount<'info, AnyMint>>,
+    #[account(init, payer = payer, space = 8 + Vault::INIT_SPACE, seeds = [VAULT_SEED, pool.key().as_ref()], bump)]
+    pub vault: Box<Account<'info, Vault>>,
+    #[account(mut, seeds = [AUTHORITY_SEED, pool.key().as_ref()], bump)]
+    pub authority: SystemAccount<'info>,
+    #[account(init_if_needed, payer = payer, associated_token::mint = base_mint, associated_token::authority = authority)]
+    pub authority_base_ata: Box<Account<'info, TokenAccount>>,
+    /// CHECK: the authority's pair-asset account address (stock pairs: created here).
+    #[account(mut, address = get_associated_token_address_with_program_id(&authority.key(), &quote_mint.key(), &quote_token_program.key()))]
+    pub authority_quote_ata: UncheckedAccount<'info>,
+    /// CHECK: the creator's pair-asset account address (stock pairs: created here).
+    #[account(mut, address = get_associated_token_address_with_program_id(&creator.key(), &quote_mint.key(), &quote_token_program.key()))]
+    pub creator_quote_ata: UncheckedAccount<'info>,
+    /// CHECK: the donation wallet written in the presale (checked in the handler when the presale has a donation share).
+    pub donee: UncheckedAccount<'info>,
+    /// CHECK: the donation wallet's pair-asset account address (stock pairs with a donation: created here; pass it writable).
+    #[account(address = get_associated_token_address_with_program_id(&donee.key(), &quote_mint.key(), &quote_token_program.key()))]
+    pub donee_quote_ata: UncheckedAccount<'info>,
+    pub token_program: Program<'info, Token>,
+    pub quote_token_program: Interface<'info, TokenInterface>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
 /// Used by `claim_curve_fees` and `claim_curve_surplus`.
 #[derive(Accounts)]
 pub struct ClaimCurve<'info> {
@@ -1515,6 +1709,8 @@ pub enum BuybackError {
     UseDistribute,
     #[msg("This vault has a buyback share; use prepare and execute.")]
     UseExecute,
+    #[msg("Not a launched CREATORFUN presale for this pool.")]
+    NotAPresale,
 }
 
 #[cfg(test)]
@@ -1701,6 +1897,29 @@ mod tests {
     fn mainnet_keeper_is_its_own_key() {
         assert_ne!(KEEPER, pubkey!("5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF"));
         assert_ne!(KEEPER, CREATORFUN_FEE_WALLET);
+    }
+
+    #[test]
+    fn presale_rules_are_read_from_a_launched_presale_only() {
+        let mut d = vec![0u8; PS_MIN_LEN + 60];
+        d[..8].copy_from_slice(&PRESALE_DISCRIMINATOR);
+        let creator = pubkey!("CooB38vtmMP4oLcSsLsmUn1YfLELG7NkfPXYTv21NcBx");
+        let pool = pubkey!("CGDFGSBNNKcAdwdV4Q3WvkwgngRsiUSj5oEdAtymZd4Y");
+        let donee = pubkey!("DTmBFBxCNLsZgEsGqWBSVfKj1rrQtZQMT3WuTTGRPMwH");
+        d[PS_CREATOR..PS_CREATOR + 32].copy_from_slice(creator.as_ref());
+        d[PS_DBC_POOL..PS_DBC_POOL + 32].copy_from_slice(pool.as_ref());
+        d[PS_DONEE..PS_DONEE + 32].copy_from_slice(donee.as_ref());
+        d[PS_BUYBACK_BPS..PS_BUYBACK_BPS + 2].copy_from_slice(&5000u16.to_le_bytes());
+        d[PS_DONATION_BPS..PS_DONATION_BPS + 2].copy_from_slice(&2000u16.to_le_bytes());
+        assert!(read_presale(&d).is_none(), "an open presale is refused");
+        d[PS_STATUS] = PS_STATUS_LAUNCHED;
+        let r = read_presale(&d).unwrap();
+        assert_eq!((r.creator, r.dbc_pool, r.donee, r.buyback_bps, r.donation_bps), (creator, pool, donee, 5000, 2000));
+        let mut bad = d.clone();
+        bad[0] ^= 1;
+        assert!(read_presale(&bad).is_none(), "another account type is refused");
+        assert!(read_presale(&d[..PS_MIN_LEN - 1]).is_none(), "a short account is refused");
+        assert_eq!(mu(1_000_000_000, PRESALE_THRESHOLD_MU), 500_000_000);
     }
 
     #[test]

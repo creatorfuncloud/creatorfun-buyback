@@ -201,6 +201,20 @@ creator wallet.
 3. **Public**: `PROBATION = false` and the upgrade authority is removed in the same release. Nobody can change the
    code after that.
 
+## Coins launched by a CREATORFUN presale
+
+A CREATORFUN presale buys the whole bonding curve at launch, so the coin graduates immediately and `enable` (which
+must happen before graduation) is not possible. Instead, when the presale creator chooses buyback or support while
+opening the presale, the presale's `launch` gives the new pool's creator rights to this program's authority before the
+first trade, and **`enable_presale`** opens the vault:
+
+- anyone can call it (the CREATORFUN keeper does it right after launch); the caller pays the vault rent and the
+  0.005 SOL reserve and chooses nothing;
+- the creator wallet, both shares and the donation wallet are read from the launched presale account (owned by the
+  presale program `2UoP3PnGv7X13GYYn9Dw8prQBJQnM4wVpEmaA4aH1X5e`), written when the presale opened;
+- the pool's creator must already be this program's authority; the run threshold is 0.5 unit;
+- probation applies to the presale creator exactly as to `enable`.
+
 ## Build and verify
 
 ```bash
