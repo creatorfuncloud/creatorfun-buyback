@@ -16,6 +16,15 @@
  *   node devnet-test.js status                            vault, balances, token supply
  *   node devnet-test.js negative                          actions that MUST fail
  *
+ * Graduation path (use a separate TEST_TAG and the stock-pair mock, whose 85-MOCK graduation is cheap on devnet):
+ *   node devnet-test.js graduate [amount]                 buy until the curve completes (default 95 of the pair asset)
+ *   node devnet-test.js migrate                           Meteora migration to the DAMM v2 pool (anyone can call)
+ *   node devnet-test.js surplus                           claim_curve_surplus
+ *   node devnet-test.js ammtrade <rounds> <amount>        buy then sell on the graduated DAMM v2 pool (LP fees)
+ *   node devnet-test.js ammclaim                          claim_amm_fees
+ *   node devnet-test.js ammrun                            prepare_amm + execute_amm (or distribute)
+ *   node devnet-test.js gradtest                          all of the above in order, with a pass/fail summary
+ *
  * Needs: OPERATOR_PRIVATE_KEY and RPC_URL in the environment (or in the .env file set by ENV_FILE),
  * the program IDL (IDL_PATH) and the npm packages below.
  */
@@ -42,6 +51,11 @@ const IDL_PATH = process.env.IDL_PATH || path.join(__dirname, '..', 'target', 'i
 const STATE = path.join(__dirname, `devnet-state${process.env.TEST_TAG ? '-' + process.env.TEST_TAG : ''}.json`);
 const PAIR_FILE = path.join(__dirname, 'devnet-pair.json'); // devnet stock-pair mock: { mint, config, decimals }
 const RESERVE = 5_000_000;
+const DAMM = new PublicKey('cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG');
+const DAMM_POOL_AUTHORITY = new PublicKey('HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC');
+const DAMM_MIGRATION_CONFIG = new PublicKey('Hv8Lmzmnju6m7kcokVKvwqz7QPmdX9XfKjJsXz8RXcjp');
+const TOKEN_2022 = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
+const IX_SWAP = Buffer.from([248, 198, 158, 145, 225, 117, 135, 200]);
 
 const key = (process.env.RPC_URL || '').match(/api-key=([A-Za-z0-9-]+)/);
 const RPC = key ? `https://devnet.helius-rpc.com/?api-key=${key[1]}` : 'https://api.devnet.solana.com';
@@ -63,6 +77,7 @@ const program = new anchor.Program(idl, provider);
 const pda = (seeds, prog) => PublicKey.findProgramAddressSync(seeds, prog)[0];
 const ata = (owner, mint, prog = TOKEN) => pda([owner.toBuffer(), prog.toBuffer(), mint.toBuffer()], ATA_PROGRAM);
 const dbcEvent = pda([Buffer.from('__event_authority')], DBC);
+const dammEvent = pda([Buffer.from('__event_authority')], DAMM);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const readState = () => (fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, 'utf8')) : {});
 const writeState = (s) => fs.writeFileSync(STATE, JSON.stringify(s, null, 2));
@@ -379,10 +394,221 @@ async function negative() {
     .accountsStrict({ caller: me.publicKey, vault: c.vault, authority: c.authority, authorityQuoteAta: ata(c.authority, c.quote, c.qprog), ammPool: fakeAmm }).rpc(), 'WrongAmmPool');
 }
 
+
+// ---------------------------------------------------------------------------
+// Graduation path: DBC completion -> DAMM v2 migration -> surplus, LP fees and buybacks on the graduated pool
+// ---------------------------------------------------------------------------
+
+const { ComputeBudgetProgram, TransactionInstruction } = require('@solana/web3.js');
+const cu = (n) => ComputeBudgetProgram.setComputeUnitLimit({ units: n });
+
+async function unitsUsed(sig) {
+  const t = await connection.getTransaction(sig, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
+  return t && t.meta ? t.meta.computeUnitsConsumed : null;
+}
+
+/** The DAMM v2 pool Meteora creates at graduation (same derivation as graduated_pool_address in lib.rs). */
+function ammInfo(c) {
+  const [first, second] = [c.mint, c.quote].sort((x, y) => Buffer.compare(y.toBuffer(), x.toBuffer()));
+  const pool = pda([Buffer.from('pool'), DAMM_MIGRATION_CONFIG.toBuffer(), first.toBuffer(), second.toBuffer()], DAMM);
+  return { pool };
+}
+
+async function ammState(c) {
+  const { pool } = ammInfo(c);
+  const info = await connection.getAccountInfo(pool);
+  if (!info) throw new Error(`Graduated pool ${pool.toBase58()} does not exist yet (run "migrate").`);
+  const mintA = new PublicKey(info.data.subarray(168, 200)), mintB = new PublicKey(info.data.subarray(200, 232));
+  const baseIsA = mintA.equals(c.mint);
+  const progOf = (m) => (m.equals(c.mint) ? TOKEN : c.qprog);
+  const vaultA = pda([Buffer.from('token_vault'), mintA.toBuffer(), pool.toBuffer()], DAMM);
+  const vaultB = pda([Buffer.from('token_vault'), mintB.toBuffer(), pool.toBuffer()], DAMM);
+  return { pool, mintA, mintB, baseIsA, progA: progOf(mintA), progB: progOf(mintB), vaultA, vaultB, owner: info.owner };
+}
+
+/** Position NFTs (Token-2022, amount 1) held by the vault authority, with their DAMM v2 position accounts. */
+async function authorityPositions(c) {
+  const res = await connection.getParsedTokenAccountsByOwner(c.authority, { programId: TOKEN_2022 });
+  return res.value.filter((a) => a.account.data.parsed.info.tokenAmount.amount === '1').map((a) => {
+    const nft = new PublicKey(a.account.data.parsed.info.mint);
+    return { nftAccount: a.pubkey, nft, position: pda([Buffer.from('position'), nft.toBuffer()], DAMM) };
+  });
+}
+
+async function graduate(amount = 95) {
+  const c = ctx();
+  const sdk = require('@meteora-ag/dynamic-bonding-curve-sdk');
+  const config = await dbc.state.getPoolConfig(c.config);
+  const threshold = new BN(config.migrationQuoteThreshold.toString());
+  let st = await poolState(c.pool);
+  console.log(`Curve: ${c.fmt(st.quoteReserve)} of ${c.fmt(threshold)} raised`);
+  const amountIn = new BN(Math.round(Number(amount) * 10 ** c.dec));
+  let sig;
+  if (typeof dbc.pool.swap2 === 'function') {
+    const mode = sdk.SwapMode ? sdk.SwapMode.PartialFill : 1;
+    const tx = await dbc.pool.swap2({ owner: me.publicKey, pool: c.pool, amountIn, minimumAmountOut: new BN(0), swapMode: mode, swapBaseForQuote: false, referralTokenAccount: null, payer: me.publicKey });
+    sig = await sendTx(tx, [me]);
+  } else {
+    const left = threshold.sub(new BN(st.quoteReserve.toString()));
+    const tx = await dbc.pool.swap({ owner: me.publicKey, pool: c.pool, amountIn: left.muln(1020).divn(1000), minimumAmountOut: new BN(0), swapBaseForQuote: false, referralTokenAccount: null });
+    sig = await sendTx(tx, [me]);
+  }
+  st = await poolState(c.pool);
+  const done = new BN(st.quoteReserve.toString()).gte(threshold);
+  console.log(`Bought: ${link(sig)}`);
+  console.log(`Curve: ${c.fmt(st.quoteReserve)} of ${c.fmt(threshold)} | migration progress ${st.migrationProgress} | ${done ? 'COMPLETE ✓' : 'not complete ✗'}`);
+  return done;
+}
+
+async function migrate() {
+  const c = ctx();
+  const st0 = await poolState(c.pool);
+  if (Number(st0.isMigrated) === 1) { console.log('Already migrated.'); return true; }
+  const m = dbc.migration;
+  if (!m || typeof m.migrateToDammV2 !== 'function') throw new Error('This SDK version has no migration.migrateToDammV2: ' + Object.keys(m || {}).join(', '));
+  if (typeof m.createDammV2MigrationMetadata === 'function') {
+    try {
+      const mt = await m.createDammV2MigrationMetadata({ payer: me.publicKey, virtualPool: c.pool, config: c.config });
+      console.log('Migration metadata:', link(await sendTx(mt, [me])));
+    } catch (e) { console.log('  (metadata step skipped:', String(e.message || e).slice(0, 90) + ')'); }
+  }
+  const r = await m.migrateToDammV2({ payer: me.publicKey, pool: c.pool, dammConfig: DAMM_MIGRATION_CONFIG });
+  const tx = r.transaction || r;
+  const extra = [r.firstPositionNftKeypair, r.secondPositionNftKeypair].filter(Boolean);
+  tx.instructions = tx.instructions.filter((i) => i.programId.toBase58() !== 'ComputeBudget111111111111111111111111111111');
+  tx.instructions.unshift(cu(1_000_000));
+  const sig = await sendTx(tx, [me, ...extra]);
+  const st = await poolState(c.pool);
+  const a = await ammState(c).catch(() => null);
+  console.log(`Migrated: ${link(sig)}`);
+  console.log(`isMigrated ${st.isMigrated} | graduated pool ${a ? a.pool.toBase58() + ' ✓ (derived address exists, owner DAMM v2)' : 'NOT FOUND ✗'}`);
+  const pos = await authorityPositions(c);
+  console.log(`Position NFTs held by the program authority: ${pos.length}${pos.length ? ' ✓' : ' ✗ (creator LP did not go to the authority)'}`);
+  pos.forEach((p) => console.log(`  NFT ${p.nft.toBase58()} -> position ${p.position.toBase58()}`));
+  return !!a && pos.length > 0;
+}
+
+async function surplus() {
+  const c = ctx();
+  const st = await poolState(c.pool);
+  const before = await vaultBalance(c);
+  const sig = await program.methods.claimCurveSurplus().accountsStrict(claimAccounts(c, st)).rpc();
+  const after = await vaultBalance(c);
+  console.log(`Curve surplus claimed: ${c.fmt(after - before)} | ${link(sig)}`);
+  return true;
+}
+
+function ammSwapIx(a, user, amountIn, baseToQuote) {
+  const c = ctx();
+  const userBase = ata(user, c.mint), userQuote = ata(user, c.quote, c.qprog);
+  const [inAcc, outAcc] = baseToQuote ? [userBase, userQuote] : [userQuote, userBase];
+  const data = Buffer.concat([IX_SWAP, new BN(amountIn).toArrayLike(Buffer, 'le', 8), new BN(0).toArrayLike(Buffer, 'le', 8)]);
+  const k = (pubkey, w = false, s = false) => ({ pubkey, isWritable: w, isSigner: s });
+  return new TransactionInstruction({ programId: DAMM, data, keys: [
+    k(DAMM_POOL_AUTHORITY), k(a.pool, true), k(inAcc, true), k(outAcc, true), k(a.vaultA, true), k(a.vaultB, true),
+    k(a.mintA), k(a.mintB), k(user, false, true), k(a.progA), k(a.progB), k(DAMM), k(dammEvent), k(DAMM),
+  ] });
+}
+
+async function ammtrade(rounds = 2, amount = 5) {
+  const c = ctx();
+  const a = await ammState(c);
+  const amountIn = Math.round(Number(amount) * 10 ** c.dec);
+  const userBase = ata(me.publicKey, c.mint);
+  for (let i = 1; i <= Number(rounds); i++) {
+    await sendTx(new Transaction().add(cu(400_000), ammSwapIx(a, me.publicKey, amountIn, false)), [me]);
+    const bal = Number((await connection.getTokenAccountBalance(userBase)).value.amount);
+    const sig = await sendTx(new Transaction().add(cu(400_000), ammSwapIx(a, me.publicKey, Math.floor(bal / 2), true)), [me]);
+    console.log(`AMM round ${i}: bought with ${c.fmt(amountIn)}, sold half | ${link(sig)}`);
+  }
+  return true;
+}
+
+async function ammclaim() {
+  const c = ctx();
+  const a = await ammState(c);
+  const pos = await authorityPositions(c);
+  if (!pos.length) throw new Error('The program authority holds no DAMM v2 position NFT.');
+  const before = await vaultBalance(c);
+  const baseBefore = Number((await connection.getTokenAccountBalance(ata(c.authority, c.mint))).value.amount);
+  let ok = true;
+  for (const p of pos) {
+    const b = program.methods.claimAmmFees().accountsStrict({
+      caller: me.publicKey, vault: c.vault, authority: c.authority, curvePool: c.pool, ammPool: a.pool, position: p.position, positionNftAccount: p.nftAccount,
+      authorityBaseAta: ata(c.authority, c.mint), authorityQuoteAta: ata(c.authority, c.quote, c.qprog), tokenAVault: a.vaultA, tokenBVault: a.vaultB,
+      baseMint: c.mint, quoteMint: c.quote, dammPoolAuthority: DAMM_POOL_AUTHORITY, dammEventAuthority: dammEvent, dammProgram: DAMM,
+      tokenProgram: TOKEN, quoteTokenProgram: c.qprog, associatedTokenProgram: ATA_PROGRAM, systemProgram: SystemProgram.programId,
+    });
+    try {
+      const ix = await b.instruction();
+      const sig = await sendTx(new Transaction().add(cu(600_000), ix), [me]);
+      console.log(`claim_amm_fees (position ${p.position.toBase58().slice(0, 6)}…): ${link(sig)} | CU ${await unitsUsed(sig)}`);
+    } catch (e) { ok = false; console.log(`claim_amm_fees FAILED for ${p.position.toBase58()}: ${e.message}`); if (e.logs) console.log(e.logs.slice(-8).join('\n')); }
+  }
+  const after = await vaultBalance(c);
+  const baseAfter = Number((await connection.getTokenAccountBalance(ata(c.authority, c.mint))).value.amount);
+  console.log(`LP fees claimed: ${c.fmt(after - before)} of the pair asset, ${baseAfter - baseBefore} base-token units`);
+  return ok;
+}
+
+async function ammrun() {
+  const c = ctx();
+  const a = await ammState(c);
+  let v = await program.account.vault.fetch(c.vault);
+  const wait = Number(v.lastRun) + 600 - Math.floor(Date.now() / 1000);
+  if (wait > 0) { console.log(`Waiting ${wait}s for the 10-minute gap since the last run…`); await sleep((wait + 5) * 1000); }
+  v = await program.account.vault.fetch(c.vault);
+  const supplyBefore = (await connection.getTokenSupply(c.mint)).value.amount;
+  const common = runAccounts(c, v);
+  let sig;
+  if (v.buybackBps === 0) {
+    sig = await sendIx(program.methods.distribute().accountsStrict({ common }), [me], doneeWritable(c, v));
+  } else {
+    const prep = await program.methods.prepareAmm().accountsStrict({ caller: me.publicKey, vault: c.vault, authority: c.authority, authorityQuoteAta: ata(c.authority, c.quote, c.qprog), ammPool: a.pool }).rpc();
+    const prepSlot = (await connection.getTransaction(prep, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 })).slot;
+    console.log(`prepare_amm: ${link(prep)}`);
+    while ((await connection.getSlot('confirmed')) < prepSlot + 26) await sleep(400);
+    const ix = await program.methods.executeAmm(new BN(0)).accountsStrict({
+      common, ammPool: a.pool, tokenAVault: a.vaultA, tokenBVault: a.vaultB,
+      dammPoolAuthority: DAMM_POOL_AUTHORITY, dammEventAuthority: dammEvent, dammProgram: DAMM,
+    }).instruction();
+    const w = doneeWritable(c, v);
+    ix.keys = ix.keys.map((k) => (w.some((x) => x.equals(k.pubkey)) ? { ...k, isWritable: true } : k));
+    sig = await sendTx(new Transaction().add(cu(1_400_000), ix), [me]);
+  }
+  const used = await unitsUsed(sig);
+  const supplyAfter = (await connection.getTokenSupply(c.mint)).value.amount;
+  console.log(`${v.buybackBps === 0 ? 'distribute' : 'execute_amm'}: ${link(sig)} | CU used ${used} of 1,400,000`);
+  console.log(`Token supply: ${supplyBefore} -> ${supplyAfter} (burned ${new BN(supplyBefore).sub(new BN(supplyAfter)).toString()})`);
+  await status();
+  return true;
+}
+
+async function gradtest() {
+  const steps = [
+    ['graduate (curve completes)', () => graduate()],
+    ['claim_curve_fees', async () => { await claim(); return true; }],
+    ['migrate to DAMM v2 (+ position NFT held by authority)', migrate],
+    ['claim_curve_surplus', surplus],
+    ['trade on the graduated pool', () => ammtrade(2, 5)],
+    ['claim_amm_fees (read-only pool, position check)', ammclaim],
+    ['prepare_amm + execute_amm (CU budget, burn)', ammrun],
+  ];
+  const out = [];
+  for (const [name, fn] of steps) {
+    console.log(`\n=== ${name} ===`);
+    try { const ok = await fn(); out.push([name, ok !== false]); } catch (e) {
+      out.push([name, false]); console.log('FAILED:', e.message); if (e.logs) console.log(e.logs.slice(-10).join('\n'));
+    }
+  }
+  console.log('\n=== summary ===');
+  out.forEach(([n, ok]) => console.log(`${ok ? '✓' : '✗'} ${n}`));
+}
+
 (async () => {
   const [cmd, a, b, d, e] = process.argv.slice(2);
-  const cmds = { pairsetup, create: () => create(a), enable: () => enable(a, b, d, e), trade: () => trade(a || 1, b || 0.5), claim, run, status, negative };
-  if (!cmds[cmd]) { console.log('usage: pairsetup | create [sol|pair] | enable <buyback%> <donation%> <threshold> [donee|new] | trade <rounds> <amount> | claim | run | status | negative'); process.exit(1); }
+  const cmds = { pairsetup, create: () => create(a), enable: () => enable(a, b, d, e), trade: () => trade(a || 1, b || 0.5), claim, run, status, negative, graduate: () => graduate(a || 95), migrate, surplus, ammtrade: () => ammtrade(a || 2, b || 5), ammclaim, ammrun, gradtest };
+  if (!cmds[cmd]) { console.log('usage: pairsetup | create [sol|pair] | enable <buyback%> <donation%> <threshold> [donee|new] | trade <rounds> <amount> | claim | run | status | negative | graduate [amount] | migrate | surplus | ammtrade <rounds> <amount> | ammclaim | ammrun | gradtest'); process.exit(1); }
   console.log(`Test wallet ${me.publicKey.toBase58()} on devnet${process.env.TEST_TAG ? ` [${process.env.TEST_TAG}]` : ''}`);
   await cmds[cmd]();
 })().catch((e) => {

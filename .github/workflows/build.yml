@@ -49,3 +49,37 @@ jobs:
             target/deploy/creatorfun_buyback_devnet.so
             target/idl/creatorfun_buyback.json
             Cargo.lock
+
+  verifiable-build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: solana-verify
+        run: cargo install solana-verify --locked
+
+      - name: Verifiable build, devnet test version (Docker)
+        run: |
+          solana-verify build --library-name creatorfun_buyback -- --features devnet
+          mkdir -p out && cp target/deploy/creatorfun_buyback.so out/creatorfun_buyback_devnet.so
+
+      - name: Verifiable build, mainnet (Docker)
+        run: |
+          solana-verify build --library-name creatorfun_buyback
+          cp target/deploy/creatorfun_buyback.so out/creatorfun_buyback.so
+          solana-verify get-executable-hash out/creatorfun_buyback.so | tee out/creatorfun_buyback.so.hash
+          solana-verify get-executable-hash out/creatorfun_buyback_devnet.so | tee out/creatorfun_buyback_devnet.so.hash
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: creatorfun-buyback-verifiable
+          path: out/*
+
+      - name: Release assets (v* tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*

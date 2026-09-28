@@ -182,6 +182,20 @@ python3 scripts/mkidl.py programs/creatorfun-buyback/src/lib.rs idl.json  # 소�
 
 모든 push는 GitHub Actions(`.github/workflows/build.yml`)가 빌드하고, 프로그램 바이너리와 SHA-256 해시를 공개합니다.
 
+### 검증 가능한 빌드
+
+`verifiable-build` 작업은 Solana Foundation의 Docker 이미지 안에서
+[solana-verify](https://github.com/solana-foundation/solana-verifiable-build)로 프로그램을 빌드합니다. 누가 빌드해도
+똑같은 바이너리가 나옵니다. 릴리스(`v*` 태그)마다 바이너리와 해시를 첨부합니다. 배포된 프로그램을 직접 확인하려면:
+
+```bash
+solana-verify build --library-name creatorfun_buyback
+solana-verify get-executable-hash target/deploy/creatorfun_buyback.so
+solana-verify get-program-hash -um <PROGRAM_ID>   # 같은 해시가 나와야 합니다
+```
+
 ## 라이선스
 
-MIT
+소스 공개 라이선스인 [PolyForm Noncommercial License 1.0.0](../LICENSE)을 따릅니다. 누구나 코드를 읽고, 검증하고,
+빌드·테스트할 수 있으며 비상업적 목적으로 사용할 수 있습니다. 상업적 이용(예: 다른 런치패드나 서비스에 넣어 운영)은
+CREATORFUN의 서면 허락 없이는 할 수 없습니다. 이 변경 이전에 공개된 버전은 MIT 라이선스로 남습니다.

@@ -213,6 +213,21 @@ python3 scripts/mkidl.py programs/creatorfun-buyback/src/lib.rs idl.json   # cli
 Every push is built by GitHub Actions (`.github/workflows/build.yml`), which publishes the program binary and its
 SHA-256 hash.
 
+### Verifiable build
+
+The `verifiable-build` job builds the program inside the Solana Foundation Docker image with
+[solana-verify](https://github.com/solana-foundation/solana-verifiable-build), so anyone gets the exact same binary.
+Each release (`v*` tag) attaches the binary and its hash. To check the deployed program yourself:
+
+```bash
+solana-verify build --library-name creatorfun_buyback
+solana-verify get-executable-hash target/deploy/creatorfun_buyback.so
+solana-verify get-program-hash -um <PROGRAM_ID>   # must print the same hash
+```
+
 ## License
 
-MIT
+Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). Anyone may read, verify, build and test
+this code and use it for noncommercial purposes. Commercial use (for example running it as part of another launchpad
+or product) is not permitted without written permission from CREATORFUN. Versions published before this change remain
+under the MIT license.
