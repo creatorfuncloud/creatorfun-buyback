@@ -5,8 +5,9 @@ buying back and burning their own token, to a donation wallet, or to both.
 
 - Website: https://creatorfun.cloud
 - Launchpad rules (immutable config): https://github.com/creatorfuncloud/creatorfun-config
-- Program ID: *published here after deployment*
-- Status: **not deployed yet, not audited** — see [Launch plan](#launch-plan)
+- Program ID (mainnet): [`eJGfjnQn4Gk7gNvyGNmDYPjBQBu6msUmSUr91fyUq2j`](https://solscan.io/account/eJGfjnQn4Gk7gNvyGNmDYPjBQBu6msUmSUr91fyUq2j)
+- Status: **mainnet probation** since 2026-10-02: only the CREATORFUN wallet can enable vaults, the upgrade
+  authority is kept for bug fixes, not audited — see [Launch plan](#launch-plan)
 
 > Other languages: [한국어](docs/README.ko.md)
 
@@ -53,7 +54,7 @@ later run). Every amount the vault donates is recorded on-chain (`total_donated`
                                   ▼
                    program authority (PDA, no private key)
                                   │
-      buyback share ≥ 1%:  prepare_*  ──►  execute_*  25–300 slots later (same caller)
+      buyback share ≥ 1%:  execute_*  as soon as the threshold is reached
       buyback share = 0%:  distribute
                                   │
         ┌─────────────────────────┼──────────────────────────┐
@@ -77,16 +78,12 @@ later run). Every amount the vault donates is recorded on-chain (`total_donated`
    - `claim_curve_fees` — creator trading fees from the bonding curve.
    - `claim_curve_surplus` — the creator's share of the curve surplus after the curve completes.
    - `claim_amm_fees` — after graduation, the fees of the creator's locked LP position in the DAMM v2 pool.
-3. **`prepare_curve` / `prepare_amm`** (buyback share ≥ 1%) — only when a run is ready: record the pool's current
-   price, slot and caller. A live prepare can only be replaced by the keeper, so nobody can keep cancelling the
-   keeper's runs.
-4. **`execute_curve` / `execute_amm`** — called by the same wallet that called `prepare`, 25 to 300 slots (about 10
-   seconds to 2 minutes) later, and only if the price has not moved more than about 1% against the buy. The program
-   buys with the buyback share, burns every token it bought (SPL `burn`: the supply really goes down), sends the
-   donation share to the donation wallet and the rest to the creator. If fees were paid in the token itself (LP
-   fees), it burns, donates and pays those by the same shares.
-5. **`distribute`** (buyback share = 0%) — same run rules, no buy, no price check: donation share to the donation
-   wallet, the rest to the creator.
+3. **`execute_curve` / `execute_amm`** — as soon as the collected amount reaches the threshold. The run uses
+   **everything that has built up**: it buys with the buyback share, burns every token it bought (SPL `burn`: the
+   supply really goes down), sends the donation share to the donation wallet and the rest to the creator. If fees
+   were paid in the token itself (LP fees), it burns, donates and pays those by the same shares.
+4. **`distribute`** (buyback share = 0%) — same run rules, no buy: donation share to the donation wallet, the rest
+   to the creator.
 
 ### Units
 
@@ -104,11 +101,9 @@ Nobody chooses the unit; it comes from the pool's own config, which cannot chang
 |---|---|
 | A run is allowed when | collected ≥ threshold, **or** 7 days since the last run and ≥ 0.01 unit collected |
 | Run threshold (chosen in `enable`) | 0.1 to 10 units |
-| Minimum gap between runs | 10 minutes |
-| Max buyback per run | 1 unit (bigger balances are processed over several runs) |
-| Max buyback per 24 hours | 5 units per token, in fixed 24-hour windows (a window starts at the first run after the last one ended, so around a boundary two windows can be used close together). A leftover allowance under 0.01 unit waits for the next window |
-| Price check | `execute` must come 25–300 slots after `prepare`, from the same wallet, and the pool price may be at most ~1% worse than at `prepare` (50 bps on the sqrt price) |
-| Slippage | the program computes a floor on-chain: at least 75% of the tokens the prepared price gives before fees and price impact. The caller can only ask for more (`min_tokens_out`), never less. If the swap gives less, the whole transaction fails and nothing is lost |
+| Limits | **none**: no per-run or per-day limit and no gap between runs. A ready run always uses everything that has built up, and runs follow each other as fast as fees come in |
+| Price / slippage | no price check in the program. The caller passes its own `min_tokens_out` (at least 1 token); the CREATORFUN keeper always sends the run |
+| Run fee (SOL coins) | a fixed **0.0005 SOL** per run comes off the top and goes to the wallet that sends the run, so the keeper never runs out of SOL for transaction fees. Fixed, never a percentage. Stock-pair coins pay no run fee |
 | Who can run | the CREATORFUN keeper whenever the rules allow; **anyone** once 8 days have passed since the last run |
 | Small payouts | payouts below 0.001 unit are kept on record (`creator_owed`, `donee_owed`) and paid with a later run, never lost |
 
@@ -120,7 +115,7 @@ Nobody chooses the unit; it comes from the pool's own config, which cannot chang
 | Send the donation share to the donation wallet saved in `enable` | Change either share, the threshold, the creator wallet or the donation wallet |
 | Send the rest to the creator wallet saved in `enable` | Give the creator rights back or to anyone else |
 | Record totals (claimed, spent, burned, donated, paid, owed) on-chain | Send fees to any wallet other than the donation wallet or the creator |
-| | Let CREATORFUN, the keeper or anyone else withdraw funds (there is no admin instruction) |
+| Pay the fixed 0.0005 SOL run fee to the wallet that sends a run (SOL coins) | Let CREATORFUN, the keeper or anyone else withdraw funds (there is no admin instruction) |
 
 The rule fields of a vault (`pool`, `config`, `base_mint`, `quote_mint`, `creator`, `donee`, `buyback_bps`,
 `donation_bps`, `threshold`, `unit`, `created_at`) are written **only** in `enable`. You can check this by searching
@@ -132,13 +127,12 @@ The keeper (`5nMsHjBcHCtH2wu1M5BSymsZLwt3oosdk82bwXvXpd4t`) is the wallet the CR
 on time. It is its own key, separate from the fee wallet and every test wallet. (The devnet test build uses
 `5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF`.)
 
-- It **can**: call `prepare_*`, `execute_*` and `distribute` before the 8-day public window opens, replace a live
-  prepare, and ask for a higher `min_tokens_out` than the on-chain floor.
-- It **cannot**: receive any funds, choose where funds go, skip the price check, go below the on-chain minimum,
-  exceed the per-run or daily caps, or change any rule.
-- If the keeper stops, anyone can run the vault 8 days after its last run. Claims are open to anyone at all times.
-- The keeper asks for `min_tokens_out` from a fresh quote with 1% slippage (above the on-chain floor) and retries
-  with a new prepare if a run fails.
+- It **can**: call `execute_*` and `distribute` before the 8-day public window opens, and receive the fixed
+  0.0005 SOL run fee for each SOL-coin run it sends.
+- It **cannot**: choose where funds go, take more than the fixed run fee, or change any rule.
+- If the keeper stops, anyone can run the vault 8 days after its last run (and receives the same run fee). Claims
+  are open to anyone at all times.
+- The keeper watches every vault, sends a run as soon as one is ready and retries right away if a run fails.
 
 ## Probation: the one remaining power
 
@@ -157,11 +151,9 @@ abusing that power. To keep that risk away from other people's money:
 - **Unaudited.** CREATORFUN could not afford a professional audit. The code is public, the rules are small pure
   functions with unit tests, and the launch is staged. Please review it and report problems — see
   [SECURITY.md](SECURITY.md).
-- **MEV is reduced, not removed.** A buyback is a market buy. The `prepare` → `execute` price check makes a
-  same-block price push fail, the 25-slot wait means a pushed price must survive about 10 seconds of arbitrage, only
-  the preparing wallet can execute, the on-chain minimum stops a run from accepting a very bad fill, and the caps
-  limit how much any single run or day can lose. Someone willing to hold a manipulated price for that long and take
-  on the arbitrage risk could still make a run worse; each run is at most 1 unit.
+- **Market buys, no price protection.** A buyback is a market buy with no price check and no slippage limit in the
+  program, by design: a run always goes through as soon as fees reach the threshold. A bot that trades around a
+  run can make that run get fewer tokens; whatever is bought is still burned and the SOL spent goes into the pool.
 - **Stock tokens have an issuer.** Tokenized stocks (for example xStocks such as TSLAx) are Token-2022 tokens whose
   issuer keeps powers this program cannot remove: it can pause transfers, move tokens out of any account (permanent
   delegate), freeze accounts, or add a transfer hook later. If the issuer pauses or freezes, runs of stock-pair coins
@@ -196,7 +188,7 @@ creator wallet.
 
 1. **Devnet**: every instruction tested end-to-end with real Meteora devnet pools (build with `--features devnet`):
    SOL coins with buyback + donation, donation only, and a Token-2022 stock-pair stand-in.
-2. **Mainnet probation**: deployed with an upgrade authority; only the CREATORFUN wallet can enable. Upgrade authority
+2. **Mainnet probation** (now, since 2026-10-02): upgrade authority [`5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF`](https://solscan.io/account/5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF). Deployed with an upgrade authority; only the CREATORFUN wallet can enable. Upgrade authority
    address and every upgrade published here.
 3. **Public**: `PROBATION = false` and the upgrade authority is removed in the same release. Nobody can change the
    code after that.

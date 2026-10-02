@@ -23,8 +23,6 @@
 //!   claim_curve_fees    anyone: creator trading fees from the bonding curve -> this program
 //!   claim_curve_surplus anyone: creator share of the curve surplus (after the curve completes) -> this program
 //!   claim_amm_fees      anyone: creator LP fees from the graduated DAMM v2 pool -> this program
-//!   prepare_curve       records the bonding-curve price; the same caller must buy 25..300 slots later near that price
-//!   prepare_amm         the same for the graduated DAMM v2 pool
 //!   execute_curve       buyback on the bonding curve, burn, pay the donation wallet and the creator
 //!   execute_amm         buyback on the graduated DAMM v2 pool, burn, pay the donation wallet and the creator
 //!   distribute          vaults with a 0% buyback share: pay the donation wallet and the creator (no buy)
@@ -63,27 +61,15 @@ pub const MAX_THRESHOLD_MU: u64 = 10_000; // 10 units (10 SOL)
 pub const TIMER_SECONDS: i64 = 7 * 24 * 60 * 60; // 7 days
 /// Smallest amount a timer run will process.
 pub const MIN_TIMER_RUN_MU: u64 = 10; // 0.01 unit
-/// Minimum time between two runs of the same vault.
-pub const MIN_RUN_GAP: i64 = 10 * 60; // 10 minutes
-/// Most one run may spend on the buyback.
-pub const MAX_BUY_PER_RUN_MU: u64 = 1_000; // 1 unit (1 SOL)
-/// Most one vault may spend on buybacks in one 24-hour window.
-pub const MAX_BUY_PER_DAY_MU: u64 = 5_000; // 5 units (5 SOL)
-/// Smallest buy a run makes. When the day's remaining allowance is below this, the run waits (DailyCapReached).
-pub const MIN_BUY_MU: u64 = 10; // 0.01 unit
+// A run uses everything that has built up: there is no per-run or per-day limit and no minimum gap between runs.
 /// Payouts smaller than this are kept (owed) and paid together with a later run.
 pub const MIN_PAYOUT_MU: u64 = 1; // 0.001 unit
-/// Anyone may prepare and run a vault once this long has passed since its last run.
-/// Before that only the CREATORFUN keeper does (the keeper can trigger runs; it can never receive funds).
+/// Anyone may run a vault once this long has passed since its last run.
+/// Before that only the CREATORFUN keeper does.
 pub const PUBLIC_RUN_DELAY: i64 = 8 * 24 * 60 * 60; // 8 days
-/// A buy must happen at least / at most this many slots after `prepare_*`.
-pub const MIN_PREPARE_SLOTS: u64 = 25; // about 10 seconds: a pushed price has to survive arbitrage this long
-pub const MAX_PREPARE_SLOTS: u64 = 300; // about two minutes
-/// How far the pool price may move against the buy between `prepare_*` and the buy (on sqrt price; 50 bps ≈ 1% price).
-pub const MAX_SQRT_PRICE_MOVE_BPS: u128 = 50;
-/// The swap must return at least this share of the tokens the prepared price would give with no impact or fee.
-/// Enforced on-chain for every caller; a caller may only ask for more, never less.
-pub const MIN_OUT_BPS: u128 = 7_500; // 75%
+/// Run fee for SOL coins: a fixed amount paid to the wallet that sends the run, so the keeper never runs out of
+/// SOL for transaction fees. Fixed, never a percentage. Stock-pair coins pay no run fee (they hold no SOL).
+pub const RUN_FEE_LAMPORTS: u64 = 500_000; // 0.0005 SOL
 /// Lamports kept by the authority to pay for its temporary wSOL account. Never spent or paid out.
 pub const AUTHORITY_RESERVE: u64 = 5_000_000; // 0.005 SOL, paid by the creator in `enable`
 
@@ -132,7 +118,6 @@ const VIRTUAL_POOL_DISCRIMINATOR: [u8; 8] = [213, 224, 5, 209, 98, 69, 119, 92];
 const POOL_CONFIG_OFFSET: usize = 72;
 const POOL_CREATOR_OFFSET: usize = 104;
 const POOL_BASE_MINT_OFFSET: usize = 136;
-const POOL_SQRT_PRICE_OFFSET: usize = 280;
 const POOL_IS_MIGRATED_OFFSET: usize = 305;
 const POOL_MIGRATION_PROGRESS_OFFSET: usize = 308;
 const POOL_CONFIG_DISCRIMINATOR: [u8; 8] = [26, 108, 14, 123, 116, 230, 129, 43];
@@ -172,8 +157,6 @@ const IX_SWAP: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200]; // same for D
 
 pub const VAULT_SEED: &[u8] = b"vault";
 pub const AUTHORITY_SEED: &[u8] = b"authority";
-const VENUE_CURVE: u8 = 1;
-const VENUE_AMM: u8 = 2;
 
 #[program]
 pub mod creatorfun_buyback {
@@ -607,48 +590,18 @@ pub mod creatorfun_buyback {
         Ok(())
     }
 
-    /// Record the bonding-curve price. The same caller must call `execute_curve` 25..300 slots later, and the
-    /// price at that moment must not be more than about 1% worse. Only runs that are ready can be prepared, and
-    /// a live reference can only be replaced by the keeper.
-    pub fn prepare_curve(ctx: Context<PrepareCurve>) -> Result<()> {
-        let a = &ctx.accounts;
-        require!(a.vault.buyback_bps > 0, BuybackError::UseDistribute);
-        let balance = income_balance(a.vault.quote_is_sol, &a.authority.to_account_info(), &a.authority_quote_ata.to_account_info());
-        check_prepare(&a.vault, balance, a.caller.key(), Clock::get()?)?;
-        let sqrt = {
-            let data = curve_pool_data(&a.curve_pool)?;
-            require!(data[POOL_IS_MIGRATED_OFFSET] == 0, BuybackError::AlreadyGraduated);
-            read_u128(&data, POOL_SQRT_PRICE_OFFSET)
-        };
-        let caller = ctx.accounts.caller.key();
-        record_reference(&mut ctx.accounts.vault, VENUE_CURVE, sqrt, caller)
-    }
-
-    /// Record the graduated DAMM v2 pool price. Same rules as `prepare_curve`.
-    pub fn prepare_amm(ctx: Context<PrepareAmm>) -> Result<()> {
-        let a = &ctx.accounts;
-        require!(a.vault.buyback_bps > 0, BuybackError::UseDistribute);
-        let balance = income_balance(a.vault.quote_is_sol, &a.authority.to_account_info(), &a.authority_quote_ata.to_account_info());
-        check_prepare(&a.vault, balance, a.caller.key(), Clock::get()?)?;
-        let (sqrt, _) = check_amm_pool(&a.amm_pool, a.vault.base_mint, a.vault.quote_mint)?;
-        let caller = a.caller.key();
-        record_reference(&mut ctx.accounts.vault, VENUE_AMM, sqrt, caller)
-    }
-
     /// Buyback on the bonding curve, burn everything bought, pay the donation wallet and the creator.
-    /// `min_tokens_out` can only raise the on-chain floor (MIN_OUT_BPS of the prepared price), never lower it.
+    /// `min_tokens_out` is the caller's own slippage choice (at least 1 token).
     pub fn execute_curve(ctx: Context<ExecuteCurve>, min_tokens_out: u64) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
         let a = &ctx.accounts;
         let c = &a.common;
         require_keys_eq!(a.venue_pool.key(), c.vault.pool, BuybackError::WrongVenue);
         require_keys_eq!(a.dbc_config.key(), c.vault.config, BuybackError::WrongConfig);
-        let sqrt_now = {
+        {
             let data = curve_pool_data(&a.venue_pool)?;
-            read_u128(&data, POOL_SQRT_PRICE_OFFSET)
-        };
-        // Buying the token raises the curve's sqrt price, so a higher price than recorded is "worse".
-        check_reference(&c.vault, VENUE_CURVE, sqrt_now, true, c.caller.key())?;
+            require!(data[POOL_IS_MIGRATED_OFFSET] == 0, BuybackError::AlreadyGraduated);
+        }
         let plan = plan_run(&c.vault, run_balance(c), now, c.caller.key())?;
 
         let pool_key = c.vault.pool;
@@ -658,7 +611,7 @@ pub mod creatorfun_buyback {
         let fee_tokens = c.authority_base_ata.amount;
 
         if plan.buy > 0 {
-            let min_out = required_min_out(plan.buy, c.vault.ref_sqrt_price, true, min_tokens_out)?;
+            let min_out = min_tokens_out.max(1);
             if c.vault.quote_is_sol {
                 fund_wsol(c, plan.buy, signer)?;
             }
@@ -717,9 +670,7 @@ pub mod creatorfun_buyback {
         let now = Clock::get()?.unix_timestamp;
         let a = &ctx.accounts;
         let c = &a.common;
-        let (sqrt_now, base_is_a) = check_amm_pool(&a.amm_pool, c.vault.base_mint, c.vault.quote_mint)?;
-        // sqrt price is token B per token A. Buying the base raises it when base is A and lowers it when base is B.
-        check_reference(&c.vault, VENUE_AMM, sqrt_now, base_is_a, c.caller.key())?;
+        let (_, base_is_a) = check_amm_pool(&a.amm_pool, c.vault.base_mint, c.vault.quote_mint)?;
         let plan = plan_run(&c.vault, run_balance(c), now, c.caller.key())?;
 
         let pool_key = c.vault.pool;
@@ -729,7 +680,7 @@ pub mod creatorfun_buyback {
         let fee_tokens = c.authority_base_ata.amount;
 
         if plan.buy > 0 {
-            let min_out = required_min_out(plan.buy, c.vault.ref_sqrt_price, base_is_a, min_tokens_out)?;
+            let min_out = min_tokens_out.max(1);
             if c.vault.quote_is_sol {
                 fund_wsol(c, plan.buy, signer)?;
             }
@@ -783,8 +734,8 @@ pub mod creatorfun_buyback {
         Ok(())
     }
 
-    /// Vaults with a 0% buyback share: nothing is bought, so there is no price check. Same run rules
-    /// (threshold or 7-day timer, 10-minute gap, keeper first then anyone after 8 days).
+    /// Vaults with a 0% buyback share: nothing is bought. Same run rules
+    /// (threshold or 7-day timer, keeper first then anyone after 8 days).
     pub fn distribute(ctx: Context<Distribute>) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
         let c = &ctx.accounts.common;
@@ -813,6 +764,8 @@ pub struct Plan {
     pub donate: u64,
     /// Creator share produced by this run (paid now, or kept as owed if it is below the minimum payout).
     pub pay: u64,
+    /// Run fee paid to the wallet that sent the run (SOL coins only).
+    pub fee: u64,
 }
 
 /// `mu` thousandths of a unit.
@@ -830,75 +783,18 @@ pub fn caller_allowed(caller_is_keeper: bool, last_run: i64, now: i64) -> bool {
     caller_is_keeper || now.saturating_sub(last_run) >= PUBLIC_RUN_DELAY
 }
 
-/// How much of `splittable` this run buys back, donates and pays the creator.
-/// `spent_today` is what the vault already spent on buybacks in the current 24-hour window.
-#[allow(clippy::too_many_arguments)]
-pub fn plan_amounts(splittable: u64, buyback_bps: u16, donation_bps: u16, threshold: u64, unit: u64, last_run: i64, now: i64, spent_today: u64) -> Result<Plan> {
+/// How much of `splittable` this run buys back, donates and pays the creator. Everything that has built up is
+/// used: a run is ready at the threshold (or after the 7-day timer) and then splits the whole amount.
+/// `run_fee` comes off the top first and goes to the wallet that sent the run.
+pub fn plan_amounts(splittable: u64, buyback_bps: u16, donation_bps: u16, threshold: u64, unit: u64, last_run: i64, now: i64, run_fee: u64) -> Result<Plan> {
     let waited = now.saturating_sub(last_run);
-    require!(waited >= MIN_RUN_GAP, BuybackError::TooSoon);
     let ready = splittable >= threshold || (waited >= TIMER_SECONDS && splittable >= mu(unit, MIN_TIMER_RUN_MU));
     require!(ready, BuybackError::NotReady);
-
-    let used = if buyback_bps > 0 {
-        let buy_cap = mu(unit, MAX_BUY_PER_RUN_MU).min(mu(unit, MAX_BUY_PER_DAY_MU).saturating_sub(spent_today));
-        // A leftover allowance too small for a real buy waits for the next window instead of making a dust run.
-        require!(buy_cap >= mu(unit, MIN_BUY_MU), BuybackError::DailyCapReached);
-        // Process at most the amount whose buyback share equals buy_cap; the rest waits for later runs.
-        splittable.min(((buy_cap as u128) * 10_000 / (buyback_bps as u128)).min(u64::MAX as u128) as u64)
-    } else {
-        splittable
-    };
+    let fee = run_fee.min(splittable / 2);
+    let used = splittable - fee;
     let buy = ((used as u128) * (buyback_bps as u128) / 10_000) as u64;
     let donate = ((used as u128) * (donation_bps as u128) / 10_000) as u64;
-    Ok(Plan { buy, donate, pay: used - buy - donate })
-}
-
-/// Spend already recorded in the current 24-hour window. The window is fixed, not rolling: it starts at the
-/// first run after the previous window ended and lasts 24 hours. Around a window boundary two windows' limits
-/// can therefore be used close together (at most 2 x MAX_BUY_PER_DAY within 24 hours, at 1 unit per 10 minutes).
-pub fn spent_in_window(day_start: i64, day_spent: u64, now: i64) -> u64 {
-    if now.saturating_sub(day_start) >= 24 * 60 * 60 { 0 } else { day_spent }
-}
-
-/// Price check between `prepare_*` and the buy. `higher_is_worse` is true when the buy pushes sqrt price up.
-pub fn price_ok(reference: u128, now_sqrt: u128, higher_is_worse: bool) -> bool {
-    if higher_is_worse {
-        now_sqrt.saturating_mul(10_000) <= reference.saturating_mul(10_000 + MAX_SQRT_PRICE_MOVE_BPS)
-    } else {
-        now_sqrt.saturating_mul(10_000) >= reference.saturating_mul(10_000 - MAX_SQRT_PRICE_MOVE_BPS)
-    }
-}
-
-/// A reference is live from its slot until MAX_PREPARE_SLOTS later.
-pub fn reference_live(ref_slot: u64, slot: u64) -> bool {
-    ref_slot > 0 && slot <= ref_slot.saturating_add(MAX_PREPARE_SLOTS)
-}
-
-/// Tokens the prepared price gives for `amount_in` of the pair asset with no price impact and no fee.
-/// `quote_per_token` is true when sqrt_price^2 is pair asset per token (bonding curve; DAMM v2 with the token as A).
-pub fn spot_tokens_out(amount_in: u64, sqrt: u128, quote_per_token: bool) -> u64 {
-    if sqrt == 0 {
-        return 0;
-    }
-    const Q64: u128 = 1u128 << 64;
-    let v = if quote_per_token {
-        // amount * 2^128 / sqrt^2, in two steps so nothing overflows for real prices
-        (amount_in as u128).checked_mul(Q64).map(|x| x / sqrt).and_then(|x| x.checked_mul(Q64)).map(|x| x / sqrt)
-    } else {
-        // amount * sqrt^2 / 2^128
-        (amount_in as u128).checked_mul(sqrt).map(|x| x / Q64).and_then(|x| x.checked_mul(sqrt)).map(|x| x / Q64)
-    };
-    match v {
-        Some(x) => x.min(u64::MAX as u128) as u64,
-        None => u64::MAX,
-    }
-}
-
-/// Minimum tokens the swap must return: the on-chain floor, or more if the caller asks for more.
-pub fn required_min_out(amount_in: u64, ref_sqrt: u128, quote_per_token: bool, asked: u64) -> Result<u64> {
-    let floor = ((spot_tokens_out(amount_in, ref_sqrt, quote_per_token) as u128) * MIN_OUT_BPS / 10_000) as u64;
-    require!(floor > 0, BuybackError::MinimumOutRequired);
-    Ok(floor.max(asked))
+    Ok(Plan { buy, donate, pay: used - buy - donate, fee })
 }
 
 /// Pair asset available to split: everything held minus what is already owed (owed amounts are not split again).
@@ -948,33 +844,8 @@ fn plan_run(vault: &Vault, balance: u64, now: i64, caller: Pubkey) -> Result<Pla
         vault.unit,
         vault.last_run,
         now,
-        spent_in_window(vault.day_start, vault.day_spent, now),
+        if vault.quote_is_sol { RUN_FEE_LAMPORTS } else { 0 },
     )
-}
-
-/// Rules for `prepare_*`: allowed caller, a run that is ready now, and no replacing someone else's live reference
-/// (only the keeper may replace a live reference, so a stranger cannot keep cancelling the keeper's runs).
-fn check_prepare(vault: &Vault, balance: u64, caller: Pubkey, clock: Clock) -> Result<()> {
-    require!(caller == KEEPER || !reference_live(vault.ref_slot, clock.slot), BuybackError::AlreadyPrepared);
-    plan_run(vault, balance, clock.unix_timestamp, caller)?;
-    Ok(())
-}
-
-fn record_reference(vault: &mut Vault, venue: u8, sqrt: u128, caller: Pubkey) -> Result<()> {
-    vault.ref_venue = venue;
-    vault.ref_sqrt_price = sqrt;
-    vault.ref_slot = Clock::get()?.slot;
-    vault.ref_caller = caller;
-    Ok(())
-}
-
-fn check_reference(vault: &Vault, venue: u8, now_sqrt: u128, higher_is_worse: bool, caller: Pubkey) -> Result<()> {
-    let slot = Clock::get()?.slot;
-    require!(vault.ref_venue == venue && vault.ref_slot > 0, BuybackError::NotPrepared);
-    require_keys_eq!(caller, vault.ref_caller, BuybackError::NotYourPrepare);
-    require!(slot >= vault.ref_slot + MIN_PREPARE_SLOTS && slot <= vault.ref_slot + MAX_PREPARE_SLOTS, BuybackError::NotPrepared);
-    require!(price_ok(vault.ref_sqrt_price, now_sqrt, higher_is_worse), BuybackError::PriceMoved);
-    Ok(())
 }
 
 fn record_claim(vault: &mut Vault, source: u8, amount: u64) {
@@ -1223,6 +1094,12 @@ fn settle(c: &mut RunAccounts<'_>, plan: Plan, fee_tokens_before: u64, now: i64,
     let paid = if creator_due >= min_payout { creator_due } else { 0 };
     pay_quote(c, &c.donee.to_account_info(), &c.donee_quote_ata.to_account_info(), donated, signer)?;
     pay_quote(c, &c.creator.to_account_info(), &c.creator_quote_ata.to_account_info(), paid, signer)?;
+    if plan.fee > 0 && c.vault.quote_is_sol {
+        system_program::transfer(
+            CpiContext::new_with_signer(c.system_program.to_account_info(), SolTransfer { from: c.authority.to_account_info(), to: c.caller.to_account_info() }, signer),
+            plan.fee,
+        )?;
+    }
 
     let caller = c.caller.key();
     let v = &mut c.vault;
@@ -1233,7 +1110,6 @@ fn settle(c: &mut RunAccounts<'_>, plan: Plan, fee_tokens_before: u64, now: i64,
         v.day_spent = 0;
     }
     v.day_spent = v.day_spent.saturating_add(plan.buy);
-    v.ref_slot = 0; // every run needs a fresh prepare
     v.runs = v.runs.saturating_add(1);
     v.last_run = now;
     v.total_spent = v.total_spent.saturating_add(plan.buy);
@@ -1251,6 +1127,7 @@ fn settle(c: &mut RunAccounts<'_>, plan: Plan, fee_tokens_before: u64, now: i64,
         burned,
         paid,
         donated,
+        run_fee: plan.fee,
         creator_owed: v.creator_owed,
         donee_owed: v.donee_owed,
         fee_tokens_to_creator: fee_to_creator,
@@ -1285,12 +1162,13 @@ pub struct Vault {
     pub created_at: i64,
     // --- run bookkeeping ---
     pub last_run: i64,
+    /// Statistics only: start of the current 24-hour window and what runs spent in it (no limit uses them).
     pub day_start: i64,
     pub day_spent: u64,
+    /// No longer used (kept so the account layout does not change).
     pub ref_venue: u8,
     pub ref_slot: u64,
     pub ref_sqrt_price: u128,
-    /// Who called `prepare_*`; only the same wallet can run the buy.
     pub ref_caller: Pubkey,
     /// Produced by runs but not yet paid because the total was below the minimum payout.
     pub creator_owed: u64,
@@ -1484,37 +1362,6 @@ pub struct ClaimAmmFees<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[derive(Accounts)]
-pub struct PrepareCurve<'info> {
-    pub caller: Signer<'info>,
-    #[account(mut, seeds = [VAULT_SEED, vault.pool.as_ref()], bump = vault.bump)]
-    pub vault: Box<Account<'info, Vault>>,
-    /// The vault's authority; with its pair-asset account it decides whether a run is ready.
-    #[account(seeds = [AUTHORITY_SEED, vault.pool.as_ref()], bump = vault.authority_bump)]
-    pub authority: SystemAccount<'info>,
-    /// CHECK: the authority's pair-asset account address (read only).
-    #[account(address = get_associated_token_address_with_program_id(&authority.key(), &vault.quote_mint, &vault.quote_token_program))]
-    pub authority_quote_ata: UncheckedAccount<'info>,
-    /// CHECK: the vault's bonding-curve pool (address checked; layout checked in the handler).
-    #[account(address = vault.pool)]
-    pub curve_pool: UncheckedAccount<'info>,
-}
-
-#[derive(Accounts)]
-pub struct PrepareAmm<'info> {
-    pub caller: Signer<'info>,
-    #[account(mut, seeds = [VAULT_SEED, vault.pool.as_ref()], bump = vault.bump)]
-    pub vault: Box<Account<'info, Vault>>,
-    /// The vault's authority; with its pair-asset account it decides whether a run is ready.
-    #[account(seeds = [AUTHORITY_SEED, vault.pool.as_ref()], bump = vault.authority_bump)]
-    pub authority: SystemAccount<'info>,
-    /// CHECK: the authority's pair-asset account address (read only).
-    #[account(address = get_associated_token_address_with_program_id(&authority.key(), &vault.quote_mint, &vault.quote_token_program))]
-    pub authority_quote_ata: UncheckedAccount<'info>,
-    /// CHECK: must be the graduated DAMM v2 pool address derived from the mints (checked in the handler).
-    pub amm_pool: UncheckedAccount<'info>,
-}
-
 /// Accounts shared by every run. The creator and donation wallets and their token accounts are pinned to the vault.
 /// Pass the donation wallet accounts writable when the vault has a donation share.
 #[derive(Accounts)]
@@ -1645,6 +1492,8 @@ pub struct RunExecuted {
     pub burned: u64,
     pub paid: u64,
     pub donated: u64,
+    /// Run fee paid to the caller (SOL coins only).
+    pub run_fee: u64,
     pub creator_owed: u64,
     pub donee_owed: u64,
     pub fee_tokens_to_creator: u64,
@@ -1681,23 +1530,23 @@ pub enum BuybackError {
     AlreadyGraduated,
     #[msg("Wrong pool for this vault.")]
     WrongVenue,
-    #[msg("Too soon: runs must be at least 10 minutes apart.")]
+    #[msg("No longer used.")]
     TooSoon,
     #[msg("Not ready: below the threshold and the 7-day timer has not passed.")]
     NotReady,
-    #[msg("This vault already spent its 24-hour buyback limit.")]
+    #[msg("No longer used.")]
     DailyCapReached,
     #[msg("Only the CREATORFUN keeper can do this now; anyone can after 8 days without a run.")]
     KeeperWindow,
-    #[msg("Call prepare first; the buy must follow 25 to 300 slots later.")]
+    #[msg("No longer used.")]
     NotPrepared,
-    #[msg("The pool price moved against the buy since prepare. Try again.")]
+    #[msg("No longer used.")]
     PriceMoved,
-    #[msg("A minimum token amount is required to protect the buy.")]
+    #[msg("No longer used.")]
     MinimumOutRequired,
-    #[msg("Only the wallet that called prepare can run this buy.")]
+    #[msg("No longer used.")]
     NotYourPrepare,
-    #[msg("A recent prepare is still live; wait until it expires.")]
+    #[msg("No longer used.")]
     AlreadyPrepared,
     #[msg("The config does not belong to this pool.")]
     WrongConfig,
@@ -1707,7 +1556,7 @@ pub enum BuybackError {
     BadDonee,
     #[msg("This vault has a 0% buyback share; use distribute.")]
     UseDistribute,
-    #[msg("This vault has a buyback share; use prepare and execute.")]
+    #[msg("This vault has a buyback share; use execute.")]
     UseExecute,
     #[msg("Not a launched CREATORFUN presale for this pool.")]
     NotAPresale,
@@ -1718,9 +1567,10 @@ mod tests {
     use super::*;
     const DAY: i64 = 24 * 60 * 60;
     const SOL: u64 = 1_000_000_000; // one unit for SOL coins
+    const FEE: u64 = RUN_FEE_LAMPORTS;
 
-    fn plan(splittable: u64, bb: u16, db: u16, threshold: u64, last_run: i64, now: i64, spent: u64) -> Result<Plan> {
-        plan_amounts(splittable, bb, db, threshold, SOL, last_run, now, spent)
+    fn plan(splittable: u64, bb: u16, db: u16, threshold: u64, last_run: i64, now: i64, fee: u64) -> Result<Plan> {
+        plan_amounts(splittable, bb, db, threshold, SOL, last_run, now, fee)
     }
 
     #[test]
@@ -1728,10 +1578,8 @@ mod tests {
         assert_eq!(85_000_000_000 / UNITS_PER_GRADUATION, SOL);
         assert_eq!(mu(SOL, MIN_THRESHOLD_MU), 100_000_000);
         assert_eq!(mu(SOL, MAX_THRESHOLD_MU), 10_000_000_000);
-        assert_eq!(mu(SOL, MAX_BUY_PER_RUN_MU), 1_000_000_000);
-        assert_eq!(mu(SOL, MAX_BUY_PER_DAY_MU), 5_000_000_000);
-        assert_eq!(mu(SOL, MIN_BUY_MU), 10_000_000);
         assert_eq!(mu(SOL, MIN_PAYOUT_MU), 1_000_000);
+        assert_eq!(RUN_FEE_LAMPORTS, 500_000);
     }
 
     #[test]
@@ -1747,73 +1595,60 @@ mod tests {
 
     #[test]
     fn below_threshold_and_timer_is_not_ready() {
-        assert!(plan(50_000_000, 3_000, 0, 500_000_000, 0, 6 * DAY, 0).is_err());
+        assert!(plan(50_000_000, 3_000, 0, 500_000_000, 0, 6 * DAY, FEE).is_err());
+        assert!(plan(499_999_999, 3_000, 0, 500_000_000, 0, 60, FEE).is_err());
     }
 
     #[test]
-    fn threshold_reached_splits_by_share() {
-        let p = plan(500_000_000, 3_000, 0, 500_000_000, 0, DAY, 0).unwrap();
-        assert_eq!(p, Plan { buy: 150_000_000, donate: 0, pay: 350_000_000 });
+    fn threshold_reached_splits_by_share_after_the_run_fee() {
+        let p = plan(500_000_000, 3_000, 0, 500_000_000, 0, DAY, FEE).unwrap();
+        let used = 500_000_000 - FEE;
+        assert_eq!(p.fee, FEE);
+        assert_eq!(p.buy, used * 3 / 10);
+        assert_eq!(p.donate, 0);
+        assert_eq!(p.buy + p.donate + p.pay + p.fee, 500_000_000);
         let p = plan(500_000_000, 3_000, 2_000, 500_000_000, 0, DAY, 0).unwrap();
-        assert_eq!(p, Plan { buy: 150_000_000, donate: 100_000_000, pay: 250_000_000 });
+        assert_eq!(p, Plan { buy: 150_000_000, donate: 100_000_000, pay: 250_000_000, fee: 0 });
     }
 
     #[test]
-    fn donation_only_has_no_buy_cap() {
-        let p = plan(20_000_000_000, 0, 4_000, 100_000_000, 0, DAY, 0).unwrap();
-        assert_eq!(p, Plan { buy: 0, donate: 8_000_000_000, pay: 12_000_000_000 });
-        // the daily buyback cap does not block a vault that never buys
-        let p = plan(1_000_000_000, 0, 10_000, 100_000_000, 0, DAY, MAX_BUY_PER_DAY_MU * SOL).unwrap();
-        assert_eq!(p, Plan { buy: 0, donate: 1_000_000_000, pay: 0 });
+    fn runs_right_away_with_no_gap() {
+        // a run may follow the previous one in the same second
+        assert!(plan(500_000_000, 3_000, 0, 500_000_000, 100, 100, FEE).is_ok());
+        assert!(plan(500_000_000, 0, 3_000, 500_000_000, 100, 100, FEE).is_ok());
     }
 
     #[test]
-    fn runs_are_at_least_10_minutes_apart() {
-        assert!(plan(500_000_000, 3_000, 0, 100_000_000, 0, 9 * 60, 0).is_err());
-        assert!(plan(500_000_000, 3_000, 0, 100_000_000, 0, 10 * 60, 0).is_ok());
-        assert!(plan(500_000_000, 0, 3_000, 100_000_000, 0, 9 * 60, 0).is_err());
+    fn everything_built_up_is_used_with_no_cap() {
+        let p = plan(50_000_000_000, 10_000, 0, 500_000_000, 0, 60, FEE).unwrap();
+        assert_eq!(p.buy, 50_000_000_000 - FEE);
+        assert_eq!(p.pay + p.donate, 0);
+        let p = plan(20_000_000_000, 0, 4_000, 500_000_000, 0, 60, 0).unwrap();
+        assert_eq!(p, Plan { buy: 0, donate: 8_000_000_000, pay: 12_000_000_000, fee: 0 });
     }
 
     #[test]
     fn timer_allows_small_runs_after_7_days() {
-        let p = plan(20_000_000, 5_000, 0, 1_000_000_000, 0, 7 * DAY, 0).unwrap();
-        assert_eq!(p, Plan { buy: 10_000_000, donate: 0, pay: 10_000_000 });
-        assert!(plan(5_000_000, 5_000, 0, 1_000_000_000, 0, 7 * DAY, 0).is_err());
+        let p = plan(20_000_000, 5_000, 0, 1_000_000_000, 0, 7 * DAY, FEE).unwrap();
+        assert_eq!(p.fee, FEE);
+        assert_eq!(p.buy + p.pay + p.fee, 20_000_000);
+        assert!(plan(5_000_000, 5_000, 0, 1_000_000_000, 0, 7 * DAY, FEE).is_err());
     }
 
     #[test]
-    fn buy_is_capped_per_run() {
-        let p = plan(5_000_000_000, 10_000, 0, 100_000_000, 0, DAY, 0).unwrap();
-        assert_eq!(p, Plan { buy: 1_000_000_000, donate: 0, pay: 0 });
-        let p = plan(10_000_000_000, 3_000, 1_000, 100_000_000, 0, DAY, 0).unwrap();
-        assert_eq!(p.buy, 999_999_999);
-        assert_eq!(p.buy + p.donate + p.pay, 3_333_333_333);
+    fn run_fee_never_takes_more_than_half() {
+        let p = plan_amounts(600_000, 5_000, 0, 1, SOL, 0, DAY, FEE).unwrap();
+        assert_eq!(p.fee, 300_000);
     }
 
     #[test]
-    fn buy_is_capped_per_day() {
-        let p = plan(5_000_000_000, 10_000, 0, 100_000_000, 0, DAY, 4_600_000_000).unwrap();
-        assert_eq!(p.buy, 400_000_000);
-        assert!(plan(5_000_000_000, 10_000, 0, 100_000_000, 0, DAY, 5_000_000_000).is_err());
-        assert_eq!(spent_in_window(0, 5_000_000_000, DAY), 0);
-        assert_eq!(spent_in_window(0, 5_000_000_000, DAY - 1), 5_000_000_000);
-    }
-
-    #[test]
-    fn tiny_leftover_allowance_waits() {
-        let min_buy = mu(SOL, MIN_BUY_MU);
-        assert!(plan(5_000_000_000, 10_000, 0, 100_000_000, 0, DAY, 5_000_000_000 - min_buy + 1).is_err());
-        let p = plan(5_000_000_000, 10_000, 0, 100_000_000, 0, DAY, 5_000_000_000 - min_buy).unwrap();
-        assert_eq!(p.buy, min_buy);
-    }
-
-    #[test]
-    fn stock_pair_units_scale_every_limit() {
+    fn stock_pair_units_scale_and_pay_no_run_fee() {
         // A stock token with 8 decimals whose config graduates at 1.7 tokens: one unit = 0.02 tokens.
         let unit = 170_000_000 / UNITS_PER_GRADUATION;
         assert_eq!(unit, 2_000_000);
-        let p = plan_amounts(10 * unit, 10_000, 0, mu(unit, MIN_THRESHOLD_MU), unit, 0, DAY, 0).unwrap();
-        assert_eq!(p.buy, mu(unit, MAX_BUY_PER_RUN_MU));
+        let p = plan_amounts(10 * unit, 10_000, 0, mu(unit, PRESALE_THRESHOLD_MU), unit, 0, 60, 0).unwrap();
+        assert_eq!(p.buy, 10 * unit);
+        assert_eq!(p.fee, 0);
         assert!(plan_amounts(mu(unit, MIN_THRESHOLD_MU) - 1, 5_000, 0, mu(unit, MIN_THRESHOLD_MU), unit, 0, DAY, 0).is_err());
     }
 
@@ -1831,65 +1666,15 @@ mod tests {
     }
 
     #[test]
-    fn price_check_blocks_pushes_against_the_buy() {
-        let r: u128 = 1_000_000_000_000;
-        assert!(price_ok(r, r, true));
-        assert!(price_ok(r, r * 10_050 / 10_000, true));
-        assert!(!price_ok(r, r * 10_051 / 10_000, true));
-        assert!(price_ok(r, r / 2, true)); // price fell: buying is cheaper, allowed
-        assert!(price_ok(r, r * 9_950 / 10_000, false));
-        assert!(!price_ok(r, r * 9_949 / 10_000, false));
-    }
-
-    #[test]
     fn nothing_is_lost_in_the_split() {
         for (bb, db) in [(0u16, 1u16), (1, 0), (1_234, 4_321), (3_000, 7_000), (9_999, 1), (10_000, 0), (0, 10_000)] {
-            for avail in [10_000_000u64, 123_456_789, 999_999_999, 3_000_000_000] {
-                let p = plan(avail, bb, db, MIN_THRESHOLD_MU * SOL / 1_000, 0, 30 * DAY, 0).unwrap();
-                assert!(p.buy + p.donate + p.pay <= avail);
-                assert!(p.buy <= mu(SOL, MAX_BUY_PER_RUN_MU));
+            for avail in [10_000_000u64, 123_456_789, 999_999_999, 3_000_000_000, 90_000_000_000] {
+                for fee in [0, FEE] {
+                    let p = plan(avail, bb, db, MIN_THRESHOLD_MU * SOL / 1_000, 0, 30 * DAY, fee).unwrap();
+                    assert_eq!(p.buy + p.donate + p.pay + p.fee, avail);
+                }
             }
         }
-    }
-
-    fn sqrt_q64(price: f64) -> u128 {
-        (price.sqrt() * 18_446_744_073_709_551_616f64) as u128
-    }
-
-    #[test]
-    fn spot_out_matches_the_price_both_ways() {
-        // 0.00003 lamports per token atom (1B supply, 6 decimals, ~30 SOL market cap)
-        let price = 0.000_03f64;
-        let expect = 1_000_000_000f64 / price;
-        let a = spot_tokens_out(1_000_000_000, sqrt_q64(price), true) as f64;
-        assert!((a - expect).abs() / expect < 1e-6);
-        // the same pool quoted the other way round (token per pair asset)
-        let b = spot_tokens_out(1_000_000_000, sqrt_q64(1.0 / price), false) as f64;
-        assert!((b - expect).abs() / expect < 1e-6);
-        // a very expensive token still works
-        let c = spot_tokens_out(1_000_000, sqrt_q64(50_000.0), true);
-        assert!(c == 19 || c == 20);
-        assert_eq!(spot_tokens_out(1_000_000_000, 0, true), 0);
-    }
-
-    #[test]
-    fn min_out_floor_cannot_be_lowered() {
-        let sqrt = sqrt_q64(0.000_03);
-        let spot = spot_tokens_out(500_000_000, sqrt, true);
-        let floor = ((spot as u128) * MIN_OUT_BPS / 10_000) as u64;
-        assert_eq!(required_min_out(500_000_000, sqrt, true, 0).unwrap(), floor);
-        assert_eq!(required_min_out(500_000_000, sqrt, true, 1).unwrap(), floor);
-        assert_eq!(required_min_out(500_000_000, sqrt, true, floor + 7).unwrap(), floor + 7);
-        assert!(required_min_out(500_000_000, 0, true, 5).is_err());
-    }
-
-    #[test]
-    fn reference_is_live_for_max_prepare_slots() {
-        assert!(!reference_live(0, 10));
-        assert!(reference_live(100, 100));
-        assert!(reference_live(100, 100 + MAX_PREPARE_SLOTS));
-        assert!(!reference_live(100, 101 + MAX_PREPARE_SLOTS));
-        assert!(MIN_PREPARE_SLOTS >= 20 && MIN_PREPARE_SLOTS < MAX_PREPARE_SLOTS);
     }
 
     #[cfg(not(feature = "devnet"))]

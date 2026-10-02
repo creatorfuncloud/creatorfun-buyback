@@ -12,7 +12,7 @@
  *                                                        turn it on; threshold in units (SOL coins: SOL)
  *   node devnet-test.js trade <rounds> <amount>           buy then sell <amount> of the pair asset per round
  *   node devnet-test.js claim                             claim_curve_fees (anyone can call)
- *   node devnet-test.js run                               prepare + execute (or distribute when buyback is 0%)
+ *   node devnet-test.js run                               execute (or distribute when buyback is 0%)
  *   node devnet-test.js status                            vault, balances, token supply
  *   node devnet-test.js negative                          actions that MUST fail
  *
@@ -22,7 +22,7 @@
  *   node devnet-test.js surplus                           claim_curve_surplus
  *   node devnet-test.js ammtrade <rounds> <amount>        buy then sell on the graduated DAMM v2 pool (LP fees)
  *   node devnet-test.js ammclaim                          claim_amm_fees
- *   node devnet-test.js ammrun                            prepare_amm + execute_amm (or distribute)
+ *   node devnet-test.js ammrun                            execute_amm (or distribute)
  *   node devnet-test.js gradtest                          all of the above in order, with a pass/fail summary
  *
  * Needs: OPERATOR_PRIVATE_KEY and RPC_URL in the environment (or in the .env file set by ENV_FILE),
@@ -269,15 +269,12 @@ function runAccounts(c, v, caller = me.publicKey) {
 }
 const doneeWritable = (c, v) => (v.donationBps > 0 ? [v.donee, ata(v.donee, c.mint), ata(v.donee, c.quote, c.qprog)] : []);
 
-// Same arithmetic as plan_amounts in lib.rs, used only to size min_tokens_out.
-function expectedBuy(v, balance, now) {
-  const unit = Number(v.unit);
+// Same arithmetic as plan_amounts in lib.rs: the whole built-up amount, minus the run fee (SOL coins).
+const RUN_FEE = 500_000;
+function expectedBuy(c, v, balance) {
   const splittable = Math.max(0, balance - Number(v.creatorOwed) - Number(v.doneeOwed));
-  const spent = now - Number(v.dayStart) >= 86400 ? 0 : Number(v.daySpent);
-  const cap = Math.min(unit, 5 * unit - spent);
-  if (cap < unit / 100) return 0;
-  const used = Math.min(splittable, Math.floor((cap * 10000) / v.buybackBps));
-  return Math.floor((used * v.buybackBps) / 10000);
+  const fee = c.isSol ? Math.min(RUN_FEE, Math.floor(splittable / 2)) : 0;
+  return Math.floor(((splittable - fee) * v.buybackBps) / 10000);
 }
 
 function curveAccounts(c, v, st, caller = me.publicKey) {
@@ -293,31 +290,22 @@ async function run() {
   const supplyBefore = (await connection.getTokenSupply(c.mint)).value.amount;
   const creatorBefore = await walletQuote(c, v.creator);
   const doneeBefore = v.donationBps > 0 ? await walletQuote(c, v.donee) : 0;
-  let sig, prepSig = null, buy = 0, minOut = new BN(0);
+  const callerBefore = await connection.getBalance(me.publicKey);
+  let sig, buy = 0;
+  const minOut = new BN(1); // no slippage limit: the run always goes through
   if (v.buybackBps === 0) {
     sig = await sendIx(program.methods.distribute().accountsStrict({ common: runAccounts(c, v) }), [me], doneeWritable(c, v));
   } else {
-    prepSig = await program.methods.prepareCurve().accountsStrict({ caller: me.publicKey, vault: c.vault, authority: c.authority, authorityQuoteAta: ata(c.authority, c.quote, c.qprog), curvePool: c.pool }).rpc();
-    const prepSlot = (await connection.getTransaction(prepSig, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 })).slot;
-    while ((await connection.getSlot('confirmed')) < prepSlot + 26) await sleep(400);
     const raw = await dbc.state.getPool(c.pool);
     const st = raw.account || raw.poolState || raw;
-    const config = await dbc.state.getPoolConfig(c.config);
-    buy = expectedBuy(v, await vaultBalance(c), Math.floor(Date.now() / 1000));
-    if (buy > 0) {
-      const q = dbc.pool.swapQuote({
-        virtualPool: raw, config, swapBaseForQuote: false, amountIn: new BN(buy), slippageBps: 100,
-        hasReferral: false, eligibleForFirstSwapWithMinFee: false, currentPoint: new BN(Math.floor(Date.now() / 1000)),
-      });
-      minOut = q.minimumAmountOut || (q.outputAmount || q.amountOut).muln(9900).divn(10000);
-    }
+    buy = expectedBuy(c, v, await vaultBalance(c));
     sig = await sendIx(program.methods.executeCurve(minOut).accountsStrict(curveAccounts(c, v, st)), [me], doneeWritable(c, v));
   }
   const supplyAfter = (await connection.getTokenSupply(c.mint)).value.amount;
   const creatorAfter = await walletQuote(c, v.creator);
-  if (prepSig) console.log(`Prepare : ${link(prepSig)}`);
   console.log(`${v.buybackBps === 0 ? 'Distribute' : 'Execute'} : ${link(sig)}`);
-  if (v.buybackBps > 0) console.log(`Spent on buyback : ${c.fmt(buy)} (min tokens out ${minOut.toString()})`);
+  if (v.buybackBps > 0) console.log(`Spent on buyback : ${c.fmt(buy)} (everything built up, no cap)`);
+  if (c.isSol) console.log(`Run fee to caller: +0.0005 SOL (caller net ${((await connection.getBalance(me.publicKey)) - callerBefore) / 1e9} SOL after the network fee)`);
   console.log(`Token supply     : ${supplyBefore} -> ${supplyAfter} (burned ${new BN(supplyBefore).sub(new BN(supplyAfter)).toString()})`);
   if (v.donationBps > 0) console.log(`Donation wallet  : +${c.fmt((await walletQuote(c, v.donee)) - doneeBefore)}`);
   console.log(`Creator wallet   : ${creatorAfter - creatorBefore >= 0 ? '+' : ''}${c.fmt(creatorAfter - creatorBefore)}${c.isSol ? ' (the test wallet also paid the network fee)' : ''}`);
@@ -357,7 +345,6 @@ async function negative() {
   const st = await poolState(c.pool);
   const stranger = Keypair.generate();
   await sendTx(new Transaction().add(SystemProgram.transfer({ fromPubkey: me.publicKey, toPubkey: stranger.publicKey, lamports: 20_000_000 })), [me]);
-  const prepAcc = (caller) => ({ caller, vault: c.vault, authority: c.authority, authorityQuoteAta: ata(c.authority, c.quote, c.qprog), curvePool: c.pool });
 
   await expectFail('enable a second time', () => program.methods.enable(5000, 0, new BN(1e8)).accountsStrict({
     creator: me.publicKey, pool: c.pool, config: c.config, baseMint: c.mint, quoteMint: c.quote, vault: c.vault, authority: c.authority,
@@ -375,23 +362,12 @@ async function negative() {
   }), [me], [stranger.publicKey]), 'ConstraintAddress');
 
   if (v.buybackBps === 0) {
-    await expectFail('prepare a vault with 0% buyback', () => program.methods.prepareCurve().accountsStrict(prepAcc(me.publicKey)).rpc(), 'UseDistribute');
+    await expectFail('execute a vault with 0% buyback', () => sendIx(program.methods.executeCurve(new BN(1)).accountsStrict(curveAccounts(c, v, st)), [me], doneeWritable(c, v)), 'UseDistribute');
     await expectFail('stranger distributes before the 8-day public window', () => sendIx(program.methods.distribute().accountsStrict({ common: runAccounts(c, v, stranger.publicKey) }), [stranger], doneeWritable(c, v)), 'KeeperWindow');
     return;
   }
   await expectFail('distribute a vault that has a buyback share', () => sendIx(program.methods.distribute().accountsStrict({ common: runAccounts(c, v) }), [me], doneeWritable(c, v)), 'UseExecute');
-  await expectFail('stranger prepares before the 8-day public window', () => program.methods.prepareCurve().accountsStrict(prepAcc(stranger.publicKey)).signers([stranger]).rpc(), 'KeeperWindow');
-  await expectFail('execute without prepare', () => sendIx(program.methods.executeCurve(new BN(1)).accountsStrict(curveAccounts(c, v, st)), [me], doneeWritable(c, v)), 'NotPrepared');
-
-  // The next two need a ready vault (claimed fees above the threshold); otherwise prepare stops with NotReady.
-  const ready = await program.methods.prepareCurve().accountsStrict(prepAcc(me.publicKey)).rpc().then(() => true, (e) => { console.log(`  (skip early/other-caller checks: ${String(e.message || e).slice(0, 80)})`); return false; });
-  if (ready) {
-    await expectFail('execute right after prepare (under 25 slots)', () => sendIx(program.methods.executeCurve(new BN(0)).accountsStrict(curveAccounts(c, v, st)), [me], doneeWritable(c, v)), 'NotPrepared');
-    await expectFail('another wallet executes the keeper prepare', () => sendIx(program.methods.executeCurve(new BN(0)).accountsStrict(curveAccounts(c, v, st, stranger.publicKey)), [stranger], doneeWritable(c, v)), 'NotYourPrepare');
-  }
-  const fakeAmm = Keypair.generate().publicKey;
-  await expectFail('use a pool that is not the derived graduated pool', () => program.methods.prepareAmm()
-    .accountsStrict({ caller: me.publicKey, vault: c.vault, authority: c.authority, authorityQuoteAta: ata(c.authority, c.quote, c.qprog), ammPool: fakeAmm }).rpc(), 'WrongAmmPool');
+  await expectFail('stranger runs before the 8-day public window', () => sendIx(program.methods.executeCurve(new BN(1)).accountsStrict(curveAccounts(c, v, st, stranger.publicKey)), [stranger], doneeWritable(c, v)), 'KeeperWindow');
 }
 
 
@@ -555,20 +531,13 @@ async function ammrun() {
   const c = ctx();
   const a = await ammState(c);
   let v = await program.account.vault.fetch(c.vault);
-  const wait = Number(v.lastRun) + 600 - Math.floor(Date.now() / 1000);
-  if (wait > 0) { console.log(`Waiting ${wait}s for the 10-minute gap since the last run…`); await sleep((wait + 5) * 1000); }
-  v = await program.account.vault.fetch(c.vault);
   const supplyBefore = (await connection.getTokenSupply(c.mint)).value.amount;
   const common = runAccounts(c, v);
   let sig;
   if (v.buybackBps === 0) {
     sig = await sendIx(program.methods.distribute().accountsStrict({ common }), [me], doneeWritable(c, v));
   } else {
-    const prep = await program.methods.prepareAmm().accountsStrict({ caller: me.publicKey, vault: c.vault, authority: c.authority, authorityQuoteAta: ata(c.authority, c.quote, c.qprog), ammPool: a.pool }).rpc();
-    const prepSlot = (await connection.getTransaction(prep, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 })).slot;
-    console.log(`prepare_amm: ${link(prep)}`);
-    while ((await connection.getSlot('confirmed')) < prepSlot + 26) await sleep(400);
-    const ix = await program.methods.executeAmm(new BN(0)).accountsStrict({
+    const ix = await program.methods.executeAmm(new BN(1)).accountsStrict({
       common, ammPool: a.pool, tokenAVault: a.vaultA, tokenBVault: a.vaultB,
       dammPoolAuthority: DAMM_POOL_AUTHORITY, dammEventAuthority: dammEvent, dammProgram: DAMM,
     }).instruction();
@@ -592,7 +561,7 @@ async function gradtest() {
     ['claim_curve_surplus', surplus],
     ['trade on the graduated pool', () => ammtrade(2, 5)],
     ['claim_amm_fees (read-only pool, position check)', ammclaim],
-    ['prepare_amm + execute_amm (CU budget, burn)', ammrun],
+    ['execute_amm (CU budget, burn)', ammrun],
   ];
   const out = [];
   for (const [name, fn] of steps) {
