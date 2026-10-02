@@ -6,8 +6,8 @@ buying back and burning their own token, to a donation wallet, or to both.
 - Website: https://creatorfun.cloud
 - Launchpad rules (immutable config): https://github.com/creatorfuncloud/creatorfun-config
 - Program ID (mainnet): [`eJGfjnQn4Gk7gNvyGNmDYPjBQBu6msUmSUr91fyUq2j`](https://solscan.io/account/eJGfjnQn4Gk7gNvyGNmDYPjBQBu6msUmSUr91fyUq2j)
-- Status: **mainnet probation** since 2026-10-02: only the CREATORFUN wallet can enable vaults, the upgrade
-  authority is kept for bug fixes, not audited — see [Launch plan](#launch-plan)
+- Status: **public** since 2026-10-02: any creator can turn it on. The upgrade authority is kept by the CREATORFUN
+  fee wallet for bug fixes, not audited — see [Launch plan](#launch-plan)
 
 > Other languages: [한국어](docs/README.ko.md)
 
@@ -24,8 +24,8 @@ This program lets the creator make a promise that cannot be broken:
 - *"Y% of my fees will always go to this donation wallet."*
 
 Once a creator turns it on, **no instruction exists to turn it off or change it — not for the creator, not for
-CREATORFUN.** The one remaining power, the program upgrade authority during probation, is described openly in
-[Probation](#probation-the-one-remaining-power).
+CREATORFUN.** The one remaining power, the program upgrade authority, is described openly in
+[Upgrade authority](#upgrade-authority-the-one-remaining-power).
 
 It works the same for **SOL coins** and **stock-pair coins** (tokens paired with a tokenized stock such as TSLAx).
 Everything is paid in the pool's own pair asset: SOL for SOL coins, the stock token for stock-pair coins.
@@ -134,16 +134,16 @@ on time. It is its own key, separate from the fee wallet and every test wallet. 
   are open to anyone at all times.
 - The keeper watches every vault, sends a run as soon as one is ready and retries right away if a run fails.
 
-## Probation: the one remaining power
+## Upgrade authority: the one remaining power
 
-During probation the program is deployed **with an upgrade authority**, so bugs can be fixed. Whoever holds an
-upgrade authority can replace the program code, so during probation the promises above rely on CREATORFUN not
-abusing that power. To keep that risk away from other people's money:
+The program is deployed **with an upgrade authority**, so bugs can be fixed. Whoever holds an upgrade authority can
+replace the program code, so the promises above also rely on CREATORFUN not abusing that power. To keep that risk small:
 
-- While `PROBATION = true`, **only CREATORFUN's own wallet** (listed in `PROBATION_CREATORS` in `lib.rs`) can call
-  `enable`. No outside creator's fees depend on the program while it can still be upgraded.
-- The upgrade authority address and every upgrade are published in this README.
-- The public version sets `PROBATION = false` and is released **together with** the removal of the upgrade authority
+- The upgrade authority is the CREATORFUN fee wallet [`CooB38vtmMP4oLcSsLsmUn1YfLELG7NkfPXYTv21NcBx`](https://solscan.io/account/CooB38vtmMP4oLcSsLsmUn1YfLELG7NkfPXYTv21NcBx), whose key is never stored on a server.
+- Every upgrade is published in this README and as a GitHub release with a verifiable build, so anyone can check that
+  the deployed code is exactly the code in this repository (`solana-verify get-program-hash`).
+- `PROBATION = false` since 2026-10-02: any creator can turn on buyback or support.
+- Once the program has run without problems for a while, the upgrade authority will be removed
   (`solana program set-upgrade-authority --final`). From then on nobody can change the code, including CREATORFUN.
 
 ## Known limits (please read)
@@ -187,11 +187,12 @@ creator wallet.
 ## Launch plan
 
 1. **Devnet**: every instruction tested end-to-end with real Meteora devnet pools (build with `--features devnet`):
-   SOL coins with buyback + donation, donation only, and a Token-2022 stock-pair stand-in.
-2. **Mainnet probation** (now, since 2026-10-02): upgrade authority [`5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF`](https://solscan.io/account/5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF). Deployed with an upgrade authority; only the CREATORFUN wallet can enable. Upgrade authority
-   address and every upgrade published here.
-3. **Public**: `PROBATION = false` and the upgrade authority is removed in the same release. Nobody can change the
-   code after that.
+   SOL coins with buyback + donation, donation only, and a Token-2022 stock-pair stand-in. Done.
+2. **Mainnet probation** (2026-10-02): deployed; only the CREATORFUN wallet could enable. Done.
+3. **Public** (since 2026-10-02, v1.0.0): `PROBATION = false`, any creator can enable. The upgrade authority is the
+   CREATORFUN fee wallet and every upgrade is published here.
+4. **Final**: the upgrade authority is removed once the program has run without problems for a while. Nobody can
+   change the code after that.
 
 ## Coins launched by a CREATORFUN presale
 

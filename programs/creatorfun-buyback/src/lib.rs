@@ -73,10 +73,9 @@ pub const RUN_FEE_LAMPORTS: u64 = 500_000; // 0.0005 SOL
 /// Lamports kept by the authority to pay for its temporary wSOL account. Never spent or paid out.
 pub const AUTHORITY_RESERVE: u64 = 5_000_000; // 0.005 SOL, paid by the creator in `enable`
 
-/// Probation: while true, only the CREATORFUN test wallets below can enable, so no outside
-/// creator's money depends on the program while it can still be upgraded. The public version sets
-/// this to false and is published together with the removal of the upgrade authority.
-pub const PROBATION: bool = true;
+/// Probation: while true, only the CREATORFUN wallets below can enable. Public since 2026-10-02 (false):
+/// any creator can enable. The upgrade authority is kept for bug fixes until it is removed (see README).
+pub const PROBATION: bool = false;
 #[cfg(not(feature = "devnet"))]
 pub const PROBATION_CREATORS: [Pubkey; 1] = [pubkey!("CooB38vtmMP4oLcSsLsmUn1YfLELG7NkfPXYTv21NcBx")]; // CREATORFUN fee wallet
 #[cfg(feature = "devnet")]

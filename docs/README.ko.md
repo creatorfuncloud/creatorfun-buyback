@@ -6,7 +6,7 @@ CREATORFUN 토큰의 발행자가 자기 거래 수수료의 일부를 **영원�
 - 웹사이트: https://creatorfun.cloud
 - 런치패드 규칙 (변경 불가 설정): https://github.com/creatorfuncloud/creatorfun-config
 - 프로그램 주소 (메인넷): [`eJGfjnQn4Gk7gNvyGNmDYPjBQBu6msUmSUr91fyUq2j`](https://solscan.io/account/eJGfjnQn4Gk7gNvyGNmDYPjBQBu6msUmSUr91fyUq2j)
-- 상태: **메인넷 시범 기간** (2026-10-02부터): CREATORFUN 지갑만 켤 수 있음, 버그 수정용 수정 권한 유지,
+- 상태: **공개** (2026-10-02부터): 모든 크리에이터가 켤 수 있음, 버그 수정용 수정 권한은 CREATORFUN 수수료 지갑이 보유,
   감사 받지 않음 — [출시 계획](#출시-계획) 참고
 
 > 영어 원문: [README.md](../README.md) (내용이 다르면 영어 원문이 기준입니다)
@@ -23,8 +23,8 @@ CREATORFUN 발행자는 자기 토큰의 모든 거래에서 0.80%를 받습니�
 - *"내 수수료의 X%는 항상 토큰을 사서 소각한다."*
 - *"내 수수료의 Y%는 항상 이 후원 지갑으로 간다."*
 
-한 번 켜면 **끄거나 바꾸는 명령 자체가 없습니다. 발행자에게도, CREATORFUN에게도.** 남아 있는 단 하나의 권한(시범
-기간의 프로그램 수정 권한)은 [시범 기간](#시범-기간-남아-있는-단-하나의-권한)에 그대로 공개합니다.
+한 번 켜면 **끄거나 바꾸는 명령 자체가 없습니다. 발행자에게도, CREATORFUN에게도.** 남아 있는 단 하나의 권한(프로그램
+수정 권한)은 [수정 권한](#수정-권한-남아-있는-단-하나의-권한)에 그대로 공개합니다.
 
 **SOL 코인**과 **주식페어 코인**(TSLAx 같은 주식 토큰과 짝지어진 토큰) 모두 같은 방식으로 동작합니다. 모든 금액은
 그 풀의 페어 자산으로 처리됩니다. SOL 코인은 SOL, 주식페어 코인은 그 주식 토큰입니다.
@@ -112,17 +112,17 @@ CREATORFUN 발행자는 자기 토큰의 모든 거래에서 0.80%를 받습니�
   언제나 누구나 할 수 있습니다.
 - 키퍼는 모든 금고를 지켜보다가 실행 조건이 채워지면 바로 실행하고, 실패하면 곧바로 다시 시도합니다.
 
-## 시범 기간: 남아 있는 단 하나의 권한
+## 수정 권한: 남아 있는 단 하나의 권한
 
-시범 기간에는 버그를 고칠 수 있도록 **수정 권한(upgrade authority)을 둔 채** 배포합니다. 수정 권한이 있으면 프로그램
-코드를 바꿀 수 있으므로, 시범 기간 동안 위의 약속은 CREATORFUN이 그 권한을 남용하지 않는다는 것에 기대게 됩니다.
-이 위험이 다른 사람의 돈에 닿지 않도록:
+버그를 고칠 수 있도록 **수정 권한(upgrade authority)을 둔 채** 배포되어 있습니다. 수정 권한이 있으면 프로그램 코드를
+바꿀 수 있으므로, 위의 약속은 CREATORFUN이 그 권한을 남용하지 않는다는 것에도 기대고 있습니다. 이 위험을 줄이기 위해:
 
-- `PROBATION = true`인 동안에는 **CREATORFUN 자체 지갑**(`lib.rs`의 `PROBATION_CREATORS`)만 `enable`을 할 수
-  있습니다. 코드를 바꿀 수 있는 동안 외부 발행자의 수수료는 이 프로그램에 들어오지 않습니다.
-- 수정 권한 주소와 모든 수정 내역을 이 README에 공개합니다.
-- 공개 버전은 `PROBATION = false`로 바꾸고, **같은 배포에서** 수정 권한을 없앱니다
-  (`solana program set-upgrade-authority --final`). 그 뒤로는 CREATORFUN을 포함해 누구도 코드를 바꿀 수 없습니다.
+- 수정 권한은 서버에 키를 두지 않는 CREATORFUN 수수료 지갑 [`CooB38vtmMP4oLcSsLsmUn1YfLELG7NkfPXYTv21NcBx`](https://solscan.io/account/CooB38vtmMP4oLcSsLsmUn1YfLELG7NkfPXYTv21NcBx)이 갖고 있습니다.
+- 모든 수정은 이 README와 검증 빌드가 붙은 GitHub 릴리스로 공개합니다. 배포된 코드가 이 저장소의 코드와 정확히 같은지
+  누구나 확인할 수 있습니다(`solana-verify get-program-hash`).
+- 2026-10-02부터 `PROBATION = false`: 모든 크리에이터가 바이백·후원을 켤 수 있습니다.
+- 한동안 문제없이 운영되면 수정 권한을 없앱니다(`solana program set-upgrade-authority --final`). 그 뒤로는
+  CREATORFUN을 포함해 누구도 코드를 바꿀 수 없습니다.
 
 ## 알려진 한계 (꼭 읽어주세요)
 
@@ -159,10 +159,12 @@ CREATORFUN 설정(`creatorfun-config`) 기준: 발행자 거래 수수료 몫은
 
 ## 출시 계획
 
-1. **데브넷**: 실제 Meteora 데브넷 풀로 모든 명령을 끝까지 테스트합니다(`--features devnet`으로 빌드). SOL 코인의
-   바이백 + 후원, 후원만, Token-2022 주식페어 대역 토큰.
-2. **메인넷 시범 기간** (지금, 2026-10-02부터): 수정 권한 [`5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF`](https://solscan.io/account/5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF). 수정 권한을 둔 채 배포, CREATORFUN 지갑만 켤 수 있음. 수정 권한 주소와 모든 수정 내역 공개.
-3. **공개**: `PROBATION = false`와 수정 권한 제거를 같은 배포에서. 그 뒤로는 누구도 코드를 바꿀 수 없습니다.
+1. **데브넷**: 실제 Meteora 데브넷 풀로 모든 명령을 끝까지 테스트했습니다(`--features devnet`으로 빌드). SOL 코인의
+   바이백 + 후원, 후원만, Token-2022 주식페어 대역 토큰. 완료.
+2. **메인넷 시범 기간** (2026-10-02): 배포, CREATORFUN 지갑만 켤 수 있었음. 완료.
+3. **공개** (2026-10-02부터, v1.0.0): `PROBATION = false`, 모든 크리에이터가 켤 수 있습니다. 수정 권한은
+   CREATORFUN 수수료 지갑이 갖고 있으며, 모든 수정 내역을 여기에 공개합니다.
+4. **최종**: 문제없이 운영되는 것을 확인한 뒤 수정 권한을 없앱니다. 그 뒤로는 누구도 코드를 바꿀 수 없습니다.
 
 ## CREATORFUN 사전판매로 출시된 코인
 
