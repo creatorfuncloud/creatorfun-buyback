@@ -97,9 +97,14 @@ pub const PRESALE_PROGRAM_ID: Pubkey = pubkey!("2UoP3PnGv7X13GYYn9Dw8prQBJQnM4wV
 pub const PRESALE_THRESHOLD_MU: u64 = 500;
 pub const DAMM_POOL_AUTHORITY: Pubkey = pubkey!("HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC");
 
-/// The CREATORFUN fee wallet. A pool is a CREATORFUN pool when its Meteora config names this wallet as the
-/// fee claimer: the SOL config and every stock-pair config do, and nobody else can make a config that pays us.
+/// The CREATORFUN fee wallet (cold: its key is never on a server). Configs made before v1.1.0 name it as fee claimer.
 pub const CREATORFUN_FEE_WALLET: Pubkey = pubkey!("CooB38vtmMP4oLcSsLsmUn1YfLELG7NkfPXYTv21NcBx");
+/// The CREATORFUN operator wallet (v1.1.0). Configs made from v1.1.0 on name it as fee claimer, so the platform fee is
+/// collected automatically and pays for graduations and the keeper; the rest goes on to the fee wallet.
+pub const CREATORFUN_OPERATOR_WALLET: Pubkey = pubkey!("5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF");
+/// A pool is a CREATORFUN pool when its Meteora config names one of these wallets as the fee claimer
+/// (a config of another platform pays that platform, not us).
+pub const CREATORFUN_FEE_CLAIMERS: [Pubkey; 2] = [CREATORFUN_FEE_WALLET, CREATORFUN_OPERATOR_WALLET];
 
 /// DAMM v2 config Meteora uses when a CREATORFUN token graduates (migration fee option 2 = FixedBps100).
 /// The graduated pool address is derived from it, so no other pool can be used.
@@ -181,7 +186,7 @@ pub mod creatorfun_buyback {
             require_keys_eq!(*a.config.owner, DBC_PROGRAM_ID, BuybackError::NotACreatorfunPool);
             let data = a.config.try_borrow_data()?;
             require!(data.len() >= CONFIG_MIN_LEN && data[..8] == POOL_CONFIG_DISCRIMINATOR, BuybackError::NotACreatorfunPool);
-            require_keys_eq!(read_pubkey(&data, CONFIG_FEE_CLAIMER_OFFSET), CREATORFUN_FEE_WALLET, BuybackError::NotACreatorfunPool);
+            require!(CREATORFUN_FEE_CLAIMERS.contains(&read_pubkey(&data, CONFIG_FEE_CLAIMER_OFFSET)), BuybackError::NotACreatorfunPool);
             require_keys_eq!(read_pubkey(&data, CONFIG_QUOTE_MINT_OFFSET), a.quote_mint.key(), BuybackError::WrongQuoteMint);
             read_u64(&data, CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET) / UNITS_PER_GRADUATION
         };
@@ -316,7 +321,7 @@ pub mod creatorfun_buyback {
             require_keys_eq!(*a.config.owner, DBC_PROGRAM_ID, BuybackError::NotACreatorfunPool);
             let data = a.config.try_borrow_data()?;
             require!(data.len() >= CONFIG_MIN_LEN && data[..8] == POOL_CONFIG_DISCRIMINATOR, BuybackError::NotACreatorfunPool);
-            require_keys_eq!(read_pubkey(&data, CONFIG_FEE_CLAIMER_OFFSET), CREATORFUN_FEE_WALLET, BuybackError::NotACreatorfunPool);
+            require!(CREATORFUN_FEE_CLAIMERS.contains(&read_pubkey(&data, CONFIG_FEE_CLAIMER_OFFSET)), BuybackError::NotACreatorfunPool);
             require_keys_eq!(read_pubkey(&data, CONFIG_QUOTE_MINT_OFFSET), a.quote_mint.key(), BuybackError::WrongQuoteMint);
             read_u64(&data, CONFIG_MIGRATION_QUOTE_THRESHOLD_OFFSET) / UNITS_PER_GRADUATION
         };
@@ -1681,6 +1686,14 @@ mod tests {
     fn mainnet_keeper_is_its_own_key() {
         assert_ne!(KEEPER, pubkey!("5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF"));
         assert_ne!(KEEPER, CREATORFUN_FEE_WALLET);
+        assert!(!CREATORFUN_FEE_CLAIMERS.contains(&KEEPER));
+    }
+
+    #[test]
+    fn fee_claimers_are_the_two_creatorfun_wallets() {
+        assert_eq!(CREATORFUN_FEE_CLAIMERS.len(), 2);
+        assert!(CREATORFUN_FEE_CLAIMERS.contains(&pubkey!("CooB38vtmMP4oLcSsLsmUn1YfLELG7NkfPXYTv21NcBx")));
+        assert!(CREATORFUN_FEE_CLAIMERS.contains(&pubkey!("5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF")));
     }
 
     #[test]

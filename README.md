@@ -67,7 +67,8 @@ later run). Every amount the vault donates is recorded on-chain (`total_donated`
 
 1. **`enable`** — The creator picks the buyback share, the donation share, the donation wallet and a run threshold.
    The program reads the Meteora pool and its config on-chain and checks: the pool is a Meteora bonding-curve pool,
-   its config names the **CREATORFUN fee wallet** as fee claimer (the SOL config and every stock-pair config do),
+   its config names a **CREATORFUN wallet** as fee claimer (the fee wallet for configs made before v1.1.0, the
+   operator wallet for configs made from v1.1.0 on; nobody else can make such a config),
    the pair asset matches the config, the signer is the current pool creator, the mint matches, and graduation has
    not started. The creator pays a 0.005 SOL reserve (rent for temporary accounts, never paid out). For stock-pair
    coins, the stock-token accounts of the program, the creator and the donation wallet are opened here, paid by the
@@ -191,7 +192,12 @@ creator wallet.
 2. **Mainnet probation** (2026-10-02): deployed; only the CREATORFUN wallet could enable. Done.
 3. **Public** (since 2026-10-02, v1.0.0): `PROBATION = false`, any creator can enable. The upgrade authority is the
    CREATORFUN fee wallet and every upgrade is published here.
-4. **Final**: the upgrade authority is removed once the program has run without problems for a while. Nobody can
+4. **v1.1.0** (2026-10-04): a config may also name the CREATORFUN operator wallet
+   [`5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF`](https://solscan.io/account/5KQ2oGJbnsJiQ8GXZ1w7QCro2sYZfMEPsmvmLter4irF)
+   as fee claimer. New configs use it, so the platform fee is collected automatically and pays for graduations and the
+   keeper (the rest goes on to the fee wallet). This is the only change: the rules for creators, donation wallets,
+   burns and payouts are exactly the same, and existing vaults are not affected.
+5. **Final**: the upgrade authority is removed once the program has run without problems for a while. Nobody can
    change the code after that.
 
 ## Coins launched by a CREATORFUN presale
