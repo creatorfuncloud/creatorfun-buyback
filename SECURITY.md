@@ -1,6 +1,6 @@
 # Security policy
 
-This program has **not** been professionally audited. We rely on open code, a staged launch and people like you. Thank you for looking.
+This program has **not** been professionally audited. Its safety rests on open source code, a verifiable build (the program on mainnet has the same hash as the build from this repository) and independent review. Thank you for looking.
 
 ## Scope
 
@@ -27,7 +27,7 @@ We will reply within 72 hours and publish the fix and the upgrade transaction in
 
 ## Rewards
 
-Every valid report is credited by name (or handle) in the README, unless you prefer to stay anonymous. Any cash reward for this program will be announced in this file before the public launch.
+Every valid report is credited by name (or handle) in the README, unless you prefer to stay anonymous. There is no fixed cash bounty at this time; if one is offered, its terms will be published in this file.
 
 ## Please
 
