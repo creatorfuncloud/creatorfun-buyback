@@ -5,6 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only by default. Only the verifiable-build job below may write, to attach release files to v* tags.
+permissions:
+  contents: read
+
 jobs:
   test-and-build:
     runs-on: ubuntu-24.04
